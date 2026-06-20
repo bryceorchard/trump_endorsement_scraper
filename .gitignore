@@ -1,6 +1,15 @@
 # MacOS
 .DS_Store
 
+# Syncthing
+.stfolder/
+.stignore
+._*
+
 # Claude
+.claude/
 
 # Python
+
+# Other
+previous_conversations/
