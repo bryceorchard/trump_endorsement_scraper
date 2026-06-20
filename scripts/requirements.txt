@@ -1,0 +1,15 @@
+# Core
+psycopg2-binary>=2.9
+requests>=2.31
+beautifulsoup4>=4.12
+feedparser>=6.0
+apscheduler>=3.10
+
+# Twitter scraping (no paid API needed)
+twscrape>=0.12
+
+# HTML parsing speed boost (optional but recommended on Pi)
+lxml>=5.0
+
+# Environment variable loading (optional)
+python-dotenv>=1.0
