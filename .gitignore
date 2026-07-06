@@ -7,9 +7,12 @@
 ._*
 
 # Claude
-.claude/
+.claude/pending-changes.md
 
 # Python
+.venv/
+__pycache__/
+*.pyc
 
 # Other
 previous_conversations/

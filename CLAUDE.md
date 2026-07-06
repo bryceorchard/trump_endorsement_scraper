@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project purpose
 
 A pipeline intended to run on a Raspberry Pi 5 that:
+
 1. Continuously scrapes every source where Trump speaks or posts (Truth Social, Twitter/X, White House briefing room, RSS news feeds).
 2. Runs each new item through a local LLM (Qwen3-8B via Ollama) to detect whether he's endorsing a company, brand, or financial asset (stock/crypto).
 3. Logs/alerts on actionable detections (alerting itself is not yet implemented — see "Known gaps" below).
@@ -18,6 +19,33 @@ The source tree was reorganized into `src/{collectors,config,database,detector}/
 - `src/collectors/*.py` do `import config` and `from .base import ...`
 
 For any of this to run, `src/config/`, `src/database/`, `src/detector/` would need to be on `sys.path` directly (or the imports rewritten to `from config.config import ...` / `from database.database import ...` / `from detector.endorsement_detector import ...`, and `config` calls updated accordingly). **Don't assume `python src/main.py` works as-is** — check/fix import wiring before running or testing changes that touch cross-module calls. `docs/SETUP.md` describes commands (`python3 main.py`, `python3 endorsement_detector.py`) that assume the old flat layout (everything in one directory), not the current `src/` subpackage layout.
+
+## Git & deployment workflow
+
+Solo project. **Deployment is decoupled from git:** Syncthing syncs the Mac's working
+directory to the headless Pi (files, not commits), so whatever is on disk runs on the Pi
+regardless of branch. `.git`, `.venv`, and `__pycache__` are Syncthing-ignored (`.stignore`)
+so git stays Mac-only and platform-specific artifacts aren't synced — the Pi builds its own
+`.venv` natively and receives only source.
+
+Because deployment doesn't depend on branch, git is purely for history + review, using a
+**Hybrid** model:
+
+- **Direct to `main`** for small, low-risk, self-contained changes (docs, config, single-file fixes).
+- **Short-lived branch + squash-merge PR** for anything non-trivial or worth reviewing (features,
+  multi-file refactors, detector/collector/schema logic) — this is where `/code-review` runs.
+
+The `/commit` slash command (`.claude/commands/commit.md`) drives this: it reads the change
+journal, picks/proposes the mode, commits, and clears the journal. Pushing and PR creation are
+confirmed explicitly (outward-facing); local commits proceed on the `/commit` go-ahead.
+
+## Change journal workflow
+
+Maintain a running journal of uncommitted work in `.claude/pending-changes.md` (gitignored — git history is the permanent record once committed):
+
+- **After each logical change**, append an entry: what changed, why, which files were touched, and current test status.
+- **When committing**, read the journal, base the commit message on it, then clear the entries (leave the header) so the file only ever reflects work since the last commit.
+- A `Stop` hook (`.claude/hooks/journal-reminder.sh`) is a backstop: it blocks the turn from ending if there are uncommitted changes newer than the journal, prompting a journal update. This is a reminder, not a substitute — write the entry as you go, don't wait for the nudge.
 
 ## Architecture
 
