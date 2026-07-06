@@ -14,5 +14,13 @@
 __pycache__/
 *.pyc
 
+# Editor / lint (local, not shared)
+.markdownlint.json
+
+# Secrets / environment (the .env.example template stays tracked)
+.env
+.env.*
+!.env.example
+
 # Other
 previous_conversations/

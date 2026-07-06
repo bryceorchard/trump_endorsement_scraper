@@ -47,6 +47,10 @@ Maintain a running journal of uncommitted work in `.claude/pending-changes.md` (
 - **When committing**, read the journal, base the commit message on it, then clear the entries (leave the header) so the file only ever reflects work since the last commit.
 - A `Stop` hook (`.claude/hooks/journal-reminder.sh`) is a backstop: it blocks the turn from ending if there are uncommitted changes newer than the journal, prompting a journal update. This is a reminder, not a substitute — write the entry as you go, don't wait for the nudge.
 
+## Local devlog
+
+`DEVLOG.md` (committed, persistent) logs **local usability changes** — tooling, workflow, and deployment plumbing set up *around* the code — **organized by subsystem**. Each chapter has a living **description + "how it works" overview** (kept current: edit it in place when the subsystem changes) and a collapsible **Changelog** of dated entries, newest first. When a local/usability/workflow/deployment change happens: update the relevant chapter's overview to reflect the new state *and* append a dated changelog entry; use discretion to extend an existing chapter or add a new one. It's distinct from the ephemeral `.claude/pending-changes.md` journal (gitignored, cleared each commit) and from this file (instructions/reference). Application-code changes do **not** go in `DEVLOG.md` — they belong in commits.
+
 ## Architecture
 
 **Pipeline shape:** independent collectors write into Postgres; a separate detection pass reads unprocessed rows and runs them through a local LLM. Collection and detection are decoupled — they run on independent schedules and neither blocks the other.
