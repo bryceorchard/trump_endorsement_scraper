@@ -22,11 +22,18 @@ For any of this to run, `src/config/`, `src/database/`, `src/detector/` would ne
 
 ## Git & deployment workflow
 
-Solo project. **Deployment is decoupled from git:** Syncthing syncs the Mac's working
-directory to the headless Pi (files, not commits), so whatever is on disk runs on the Pi
-regardless of branch. `.git`, `.venv`, and `__pycache__` are Syncthing-ignored (`.stignore`)
-so git stays Mac-only and platform-specific artifacts aren't synced — the Pi builds its own
-`.venv` natively and receives only source.
+Solo project. **Deployment is decoupled from git:** Syncthing syncs files (not commits) from
+the Mac to the headless Pi, so whatever is on disk under the synced paths runs on the Pi
+regardless of branch.
+
+> ⚠️ **Syncthing ships an allowlist — only `src/`, `scripts/`, and `test/` reach the Pi.**
+> Everything else at the repo root (docs, `.claude/`, `*.md`, root configs, any *new* top-level
+> file or dir) is ignored and will **not** sync. If you add something the Pi needs at runtime,
+> either put it under `src/`/`scripts/`/`test/`, **or** widen the allowlist in `.stignore` on
+> *both* machines (Mac **and** Pi — `.stignore` doesn't sync itself); see
+> [DEVLOG.md](DEVLOG.md) → "Syncthing deployment". A file placed outside the allowlist silently
+> never reaches the Pi, which is an easy way to ship a broken deploy. The Pi builds its own
+> `.venv` natively; `.git`/`.venv`/`__pycache__` never sync.
 
 Because deployment doesn't depend on branch, git is purely for history + review, using a
 **Hybrid** model:
@@ -57,7 +64,7 @@ Maintain a running journal of uncommitted work in `.claude/pending-changes.md` (
 
 - **`collectors/`** — one class per source, all subclassing `BaseCollector` (`collectors/base.py`). Each subclass implements only `collect() -> list[CollectedItem]`; the base class handles run logging (`collection_runs` table), upsert/dedup, and per-item error isolation (one bad item doesn't fail the run). Sources: `truth_social.py` (Mastodon-compatible public API, no auth), `twitter.py` (via `twscrape`, needs registered accounts, degrades to a no-op if `twscrape` isn't installed), `whitehouse.py` (BeautifulSoup scrape of three briefing-room sections), `rss.py` (feedparser, filtered to entries containing a keyword from `RSS_FILTER_KEYWORDS`).
 - **`database/database.py`** — owns the Postgres schema (`sources`, `items`, `collection_runs`, `endorsements`) and is the only module that touches SQL. `init_db()` is idempotent (CREATE TABLE IF NOT EXISTS + seed sources via ON CONFLICT DO NOTHING) and is called unconditionally at the top of `main()` regardless of which CLI mode is selected. Dedup key is `(source_id, external_id)`; `external_id` is the platform's native ID where one exists, otherwise a SHA-256 hash of the URL (whitehouse, rss-without-link). The full original API/HTML payload is kept in `items.raw_json` so items can be re-analyzed later without re-fetching.
-- **`detector/endorsement_detector.py`** — `detect_endorsement(text)` posts to a local Ollama instance (`OLLAMA_URL`, default `qwen3:8b`) with `"think": false` (disables Qwen3 chain-of-thought — needed because it roughly doubles inference time and isn't useful for this structured-extraction task) and `temperature: 0.1`, then parses the model's JSON response into an `EndorsementResult` dataclass. Raises `RuntimeError` if Ollama isn't reachable (the caller in `main.py` treats this as "stop the detection loop, don't mark items processed" rather than a per-item failure). `is_actionable()` gates alerting on confidence (`high`/`medium`) and `endorsement_type != "none"`.
+- **`detector/endorsement_detector.py`** — `detect_endorsement(text)` posts to a local Ollama instance (`OLLAMA_URL`) using `OLLAMA_MODEL` (default `qwen3:8b`) with `"think": false` (disables Qwen3 chain-of-thought — needed because it roughly doubles inference time and isn't useful for this structured-extraction task) and `temperature: 0.1`, then parses the model's JSON response into an `EndorsementResult` dataclass. Raises `RuntimeError` if Ollama isn't reachable (the caller in `main.py` treats this as "stop the detection loop, don't mark items processed" rather than a per-item failure). `is_actionable()` gates alerting on confidence (`high`/`medium`) and `endorsement_type != "none"`.
 - **`main.py`** — CLI entry point and scheduler. `run_detection()` pulls a batch of unprocessed items (`processed_at IS NULL`), runs each through the detector, and persists results via `save_endorsement()`, which also stamps `items.processed_at` so items aren't reprocessed. A permanently-broken item (detector raises something other than `RuntimeError`) is still marked processed via a synthetic "no detection" result, specifically to avoid retrying it forever. In scheduled mode, each collector and the detection pass run as independent APScheduler interval jobs (`BlockingScheduler`), each configured to fire immediately on startup as well as on its interval.
 
 ## Configuration
