@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 # setup.sh — One-time setup for trump_tracker on Raspberry Pi 5
 # Run as your normal user (not root). sudo is used only where required.
+# Safe to run from anywhere — paths are resolved relative to this script.
 set -e
+
+# Resolve locations from the script itself, so cwd doesn't matter.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+SRC_DIR="$PROJECT_ROOT/src"
+VENV="$PROJECT_ROOT/.venv"   # project-root venv: outside the Syncthing allowlist, so ARM
+                             # binaries never sync — the Pi keeps its own native .venv.
 
 echo "=== trump_tracker setup ==="
 echo ""
@@ -31,30 +39,36 @@ sudo -u postgres psql -c "CREATE USER trump_tracker_user WITH PASSWORD 'changeme
 sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE trump_tracker TO trump_tracker_user;" 2>/dev/null || true
 echo ""
 
-# ── 3. Python dependencies ────────────────────────────────────────────────────
-echo "[3/5] Installing Python dependencies..."
-pip install -r requirements.txt --break-system-packages
+# ── 3. Python dependencies (in a virtualenv) ──────────────────────────────────
+echo "[3/5] Installing Python dependencies into a virtualenv..."
+sudo apt-get install -y python3-venv
+python3 -m venv "$VENV"
+"$VENV/bin/pip" install --upgrade pip
+"$VENV/bin/pip" install -r "$SCRIPT_DIR/requirements.txt"
+echo "  Virtualenv ready at $VENV"
 echo ""
 
 # ── 4. Environment file ───────────────────────────────────────────────────────
 echo "[4/5] Setting up .env..."
-if [ ! -f .env ]; then
-    cp .env.example .env
-    echo "  Created .env from .env.example."
-    echo "  !! Edit .env and fill in your DATABASE_URL and Twitter credentials before running."
+if [ ! -f "$SRC_DIR/.env" ]; then
+    cp "$SRC_DIR/.env.example" "$SRC_DIR/.env"
+    echo "  Created $SRC_DIR/.env from .env.example."
+    echo "  !! Edit it and fill in your DATABASE_URL and Twitter credentials before running."
 else
-    echo "  .env already exists, skipping."
+    echo "  $SRC_DIR/.env already exists, skipping."
 fi
 echo ""
 
 # ── 5. Twitter / twscrape account setup ──────────────────────────────────────
 echo "[5/5] Registering Twitter accounts with twscrape..."
-echo "  This requires TWITTER_ACCOUNTS_JSON to be set in your .env."
-echo "  Run this step manually after editing .env:"
+echo "  This requires TWITTER_ACCOUNTS_JSON to be set in src/.env."
+echo "  Run this step manually after editing src/.env:"
 echo ""
+echo "    cd \"$SRC_DIR\""
 echo "    export \$(cat .env | xargs)"
-echo "    python3 -c \""
-echo "    import asyncio, json, config"
+echo "    \"$VENV/bin/python3\" -c \""
+echo "    import asyncio, json"
+echo "    from config import config"
 echo "    from twscrape import AccountsPool"
 echo "    async def add():"
 echo "        pool = AccountsPool()"
@@ -68,9 +82,10 @@ echo ""
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo "=== Setup complete ==="
 echo ""
-echo "Next steps:"
-echo "  1. Edit .env with your credentials"
+echo "Next steps (run the app from src/ with the venv's Python):"
+echo "  1. Edit src/.env with your credentials"
 echo "  2. Run the twscrape account registration above"
-echo "  3. Initialise the database:  python3 main.py --run-once"
-echo "  4. Test the detector:        python3 endorsement_detector.py"
-echo "  5. Start the scheduler:      python3 main.py"
+echo "  3. cd \"$SRC_DIR\""
+echo "  4. Initialise the database:  \"$VENV/bin/python3\" main.py --run-once"
+echo "  5. Test the detector:        \"$VENV/bin/python3\" -m detector.endorsement_detector"
+echo "  6. Start the scheduler:      \"$VENV/bin/python3\" main.py"

@@ -20,6 +20,7 @@
 | [2. Git workflow and /commit](#2-git-workflow-and-commit) | 2026-07-06 |
 | [3. Syncthing deployment](#3-syncthing-deployment) | 2026-07-06 |
 | [4. Local tooling](#4-local-tooling) | 2026-07-06 |
+| [5. Pi environment (setup.sh)](#5-pi-environment-setupsh) | 2026-07-08 |
 
 ---
 
@@ -100,6 +101,27 @@ Local CLI tools and repo lint configuration that support the workflow.
 - **2026-07-06**
   - Added a local (gitignored) `.markdownlint.json` disabling `MD041` (first line h1), `MD040` (fenced block language), `MD033` (inline HTML) and `MD013` (line length), because they annoy me.
   - Installed **GitHub CLI (`gh`) 2.96.0** via Homebrew and authenticated it.
+
+</details>
+
+---
+
+## 5. Pi environment (setup.sh)
+
+`scripts/setup.sh` provisions a fresh Raspberry Pi 5 for the pipeline: Ollama + the `qwen3:8b` model, PostgreSQL (db/user/grants), the Python dependencies, a scaffolded `.env`, and a printed twscrape account-registration step. It's re-runnable — each step no-ops or reuses if already done.
+
+**How it works.**
+
+- **Self-locating:** resolves `SCRIPT_DIR`/`PROJECT_ROOT`/`SRC_DIR`/`VENV` from `${BASH_SOURCE[0]}`, so it runs correctly from any cwd (not just the dir it happens to sit in).
+- **Project-root virtualenv:** Python deps install into `$PROJECT_ROOT/.venv` (`/home/bryce/project/.venv` on the Pi), **never** system Python. Root placement keeps the venv outside the Syncthing allowlist (`/src /scripts /test`), so ARM binaries never sync — this is the concrete mechanism behind Chapter 3's "the Pi builds its own `.venv`" golden rule. Run the app with `.venv/bin/python3` (systemd's `ExecStart` and the `docs/SETUP.md` commands do this).
+- **`.env` scaffold:** copies `src/.env.example` → `src/.env` (the app reads env from `src/`); left for you to fill in.
+
+<details><summary>📋 Changelog</summary>
+
+- **2026-07-08**
+  - Replaced `pip install --break-system-packages` (system Python, overrides PEP 668) with a project-root `.venv` built via `python3 -m venv`; added the `python3-venv` apt dependency. Merged as PR #3.
+  - Made the script self-locating (`SCRIPT_DIR`/`PROJECT_ROOT`) so it no longer depends on cwd; corrected the `.env` path to `src/.env`; de-staled the printed run commands (`from config import config`, `python3 -m detector.endorsement_detector`, run from `src/` with the venv Python).
+  - Kept `docs/SETUP.md` and `CLAUDE.md` in step (venv-based install, systemd `ExecStart` → `.venv/bin/python3`).
 
 </details>
 
