@@ -22,9 +22,9 @@ from datetime import datetime
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-import config
-from database import init_db, get_unprocessed_items, save_endorsement
-from endorsement_detector import detect_endorsement, is_actionable
+from config import config
+from database.database import init_db, get_unprocessed_items, save_endorsement
+from detector.endorsement_detector import detect_endorsement, is_actionable
 from collectors import (
     TruthSocialCollector,
     TwitterCollector,
@@ -118,7 +118,7 @@ def run_detection():
 
 def _make_error_result(text: str):
     """Fallback result used when the LLM call fails, so we don't retry forever."""
-    from endorsement_detector import EndorsementResult
+    from detector.endorsement_detector import EndorsementResult
     return EndorsementResult(
         endorsement_detected=False,
         company=None,

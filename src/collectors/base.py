@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Optional
 import logging
 
-from database import upsert_item, log_run, finish_run
+from database.database import upsert_item, log_run, finish_run
 
 logger = logging.getLogger(__name__)
 

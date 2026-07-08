@@ -5,7 +5,7 @@ Detects Trump company endorsements in text using Qwen3-8B via Ollama.
 Returns structured JSON so the rest of the pipeline can act on results.
 
 Usage:
-    from endorsement_detector import detect_endorsement
+    from detector.endorsement_detector import detect_endorsement
     result = detect_endorsement("Just met with the amazing people at Apple...")
 """
 
@@ -14,7 +14,7 @@ import requests
 from dataclasses import dataclass
 from typing import Optional
 
-import config
+from config import config
 
 OLLAMA_URL = config.OLLAMA_URL
 MODEL      = config.OLLAMA_MODEL

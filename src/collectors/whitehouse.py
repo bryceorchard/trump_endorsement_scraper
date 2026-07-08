@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-import config
+from config import config
 from .base import BaseCollector, CollectedItem
 
 logger = logging.getLogger(__name__)

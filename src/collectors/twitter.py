@@ -28,7 +28,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-import config
+from config import config
 from .base import BaseCollector, CollectedItem
 
 logger = logging.getLogger(__name__)

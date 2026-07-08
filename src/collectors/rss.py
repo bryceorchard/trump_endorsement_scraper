@@ -16,7 +16,7 @@ from typing import Optional
 import feedparser
 import requests
 
-import config
+from config import config
 from .base import BaseCollector, CollectedItem
 
 logger = logging.getLogger(__name__)
