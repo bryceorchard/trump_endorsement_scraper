@@ -15,7 +15,7 @@ from re import compile as re_compile
 
 import requests
 
-import config
+from config import config
 from .base import BaseCollector, CollectedItem
 
 logger = logging.getLogger(__name__)

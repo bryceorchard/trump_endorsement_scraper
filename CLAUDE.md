@@ -10,15 +10,24 @@ A pipeline intended to run on a Raspberry Pi 5 that:
 2. Runs each new item through a local LLM (Qwen3-8B via Ollama) to detect whether he's endorsing a company, brand, or financial asset (stock/crypto).
 3. Logs/alerts on actionable detections (alerting itself is not yet implemented — see "Known gaps" below).
 
-## Known gap: import paths don't match the directory layout
+## Module layout & import convention
 
-The source tree was reorganized into `src/{collectors,config,database,detector}/` subpackages, but the module code was never updated to match — every file still uses flat, top-level imports:
+`src/` is the import root (not itself a package — it has no `__init__.py`). Its subdirectories
+`collectors/`, `config/`, `database/`, `detector/` are all packages (each has an `__init__.py`).
+Running `python3 main.py` from inside `src/` puts `src/` on `sys.path[0]`, so these packages
+resolve without any `PYTHONPATH`/`sys.path` fiddling.
 
-- `src/main.py` does `import config`, `from database import ...`, `from endorsement_detector import ...`, `from collectors import ...`
-- `src/detector/endorsement_detector.py` does `import config`
-- `src/collectors/*.py` do `import config` and `from .base import ...`
+Cross-module imports are **package-qualified** — match this convention, don't reintroduce flat
+top-level imports:
 
-For any of this to run, `src/config/`, `src/database/`, `src/detector/` would need to be on `sys.path` directly (or the imports rewritten to `from config.config import ...` / `from database.database import ...` / `from detector.endorsement_detector import ...`, and `config` calls updated accordingly). **Don't assume `python src/main.py` works as-is** — check/fix import wiring before running or testing changes that touch cross-module calls. `docs/SETUP.md` describes commands (`python3 main.py`, `python3 endorsement_detector.py`) that assume the old flat layout (everything in one directory), not the current `src/` subpackage layout.
+- `from config import config` — imports the `config.py` module from the `config` package and binds
+  the name `config`, so `config.FOO` attribute access works everywhere.
+- `from database.database import ...`, `from detector.endorsement_detector import ...`.
+- Within `collectors/`, sibling imports are relative (`from .base import ...`).
+
+> `docs/SETUP.md` still shows the old flat-layout commands (`python3 endorsement_detector.py`);
+> the detector's manual-test entry point is now `python3 -m detector.endorsement_detector` (run
+> from `src/`). `python3 main.py` is unchanged.
 
 ## Git & deployment workflow
 
@@ -84,13 +93,12 @@ pip install -r scripts/requirements.txt --break-system-packages   # or omit the 
 
 # one-time Twitter/twscrape account registration — see docs/SETUP.md Step 5
 
+# run from inside src/ (it's the import root — see "Module layout & import convention")
 python3 main.py --run-once              # run all collectors + detection once
 python3 main.py --collector truth_social  # run a single named collector (truth_social|twitter|whitehouse|rss)
 python3 main.py --detect-only           # run detection only, against whatever's already in the DB
 python3 main.py                          # scheduled mode (blocking), per-source intervals from config
-python3 endorsement_detector.py          # quick manual test of the detector against hardcoded sample text
+python3 -m detector.endorsement_detector  # quick manual test of the detector against hardcoded sample text
 ```
-
-(See "Known gap" above — these commands match the documented flat layout, not the current `src/` subpackage structure.)
 
 Full setup instructions (Ollama/Qwen3-8B install, Postgres setup, systemd service, troubleshooting) are in `docs/SETUP.md`.
