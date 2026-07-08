@@ -14,6 +14,26 @@ VENV="$PROJECT_ROOT/.venv"   # project-root venv: outside the Syncthing allowlis
 echo "=== trump_tracker setup ==="
 echo ""
 
+# ── 0. Configuration ──────────────────────────────────────────────────────────
+# Collect interactive input up front so the long install steps run unattended.
+echo "Choose a password for the PostgreSQL user 'trump_tracker_user':"
+while true; do
+    read -rs -p "  Database password: " DB_PASSWORD; echo
+    read -rs -p "  Confirm password:  " DB_PASSWORD_CONFIRM; echo
+    if [ -z "$DB_PASSWORD" ]; then
+        echo "  Password cannot be empty — try again."
+    elif [ "$DB_PASSWORD" != "$DB_PASSWORD_CONFIRM" ]; then
+        echo "  Passwords don't match — try again."
+    else
+        break
+    fi
+done
+unset DB_PASSWORD_CONFIRM
+# Escape single quotes for the SQL string literal; percent-encode for the DATABASE_URL.
+DB_PASSWORD_SQL=${DB_PASSWORD//\'/\'\'}
+DB_PASSWORD_URL=$(python3 -c 'import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$DB_PASSWORD")
+echo ""
+
 # ── 1. Ollama ─────────────────────────────────────────────────────────────────
 echo "[1/5] Installing Ollama..."
 curl -fsSL https://ollama.com/install.sh | sh
@@ -33,11 +53,13 @@ sudo apt-get install -y postgresql postgresql-contrib
 sudo systemctl enable postgresql
 sudo systemctl start postgresql
 
-# Create the database (safe to run if it already exists)
+# Create the database and role (safe to re-run). The role's password is always
+# (re)set via ALTER ROLE so a re-run picks up a newly chosen password.
 sudo -u postgres psql -c "CREATE DATABASE trump_tracker;" 2>/dev/null || echo "  (database already exists, skipping)"
-sudo -u postgres psql -c "CREATE USER trump_tracker_user WITH PASSWORD 'changeme';" 2>/dev/null || echo "  (user already exists, skipping)"
+sudo -u postgres psql -c "CREATE ROLE trump_tracker_user LOGIN;" 2>/dev/null || echo "  (role already exists, updating password)"
+sudo -u postgres psql -c "ALTER ROLE trump_tracker_user PASSWORD '$DB_PASSWORD_SQL';"
 sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE trump_tracker TO trump_tracker_user;" 2>/dev/null || true
-echo ""
+echo "  PostgreSQL database 'trump_tracker' and role 'trump_tracker_user' ready; password set from your input."
 
 # ── 3. Python dependencies (in a virtualenv) ──────────────────────────────────
 echo "[3/5] Installing Python dependencies into a virtualenv..."
@@ -52,10 +74,12 @@ echo ""
 echo "[4/5] Setting up .env..."
 if [ ! -f "$SRC_DIR/.env" ]; then
     cp "$SRC_DIR/.env.example" "$SRC_DIR/.env"
-    echo "  Created $SRC_DIR/.env from .env.example."
-    echo "  !! Edit it and fill in your DATABASE_URL and Twitter credentials before running."
+    # Point DATABASE_URL at the role/password we just configured (| delimiter: URL has /).
+    sed -i "s|^DATABASE_URL=.*|DATABASE_URL=postgresql://trump_tracker_user:${DB_PASSWORD_URL}@localhost/trump_tracker|" "$SRC_DIR/.env"
+    echo "  Created $SRC_DIR/.env from .env.example, with DATABASE_URL set to your DB password."
+    echo "  !! Still edit it to fill in your Twitter credentials before running."
 else
-    echo "  $SRC_DIR/.env already exists, skipping."
+    echo "  $SRC_DIR/.env already exists, leaving it untouched (DATABASE_URL not modified)."
 fi
 echo ""
 
