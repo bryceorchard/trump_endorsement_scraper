@@ -44,6 +44,29 @@ regardless of branch.
 > never reaches the Pi, which is an easy way to ship a broken deploy. The Pi builds its own
 > `.venv` natively; `.git`/`.venv`/`__pycache__` never sync.
 
+### Running things on the Pi
+
+The deployment target is a headless Raspberry Pi 5. To run or inspect anything there:
+
+> ⚠️ **LAN-only — no remote access.** The Pi is reachable only on the local network
+> (`192.168.2.10`). There is currently no VPN/overlay/tunnel, so **off-LAN, `ssh brycepi5` and the
+> Syncthing GUI just time out** — don't retry, and defer any Pi commands until back on the local
+> network (or until a remote path is set up). Note that Syncthing still deploys code whenever both
+> machines are next online together; it's only *interactive* Pi access that requires the LAN.
+
+- **SSH (on-LAN):** `ssh brycepi5` — alias in `~/.ssh/config` → `192.168.2.10`, user `bryce`, key
+  `~/.ssh/brycepi5` (aarch64, key-based). For non-interactive/scripted commands add
+  `-o BatchMode=yes`.
+- **Project path on Pi:** `/home/bryce/project` (the synced deploy set); the app's import root is
+  `/home/bryce/project/src` — run `main.py` from there with the Pi's own `.venv` (see "Module
+  layout & import convention" and `docs/SETUP.md`).
+- **Service:** it runs under systemd as `trump-tracker`. Manage it with
+  `sudo systemctl {status,restart,stop} trump-tracker` and tail logs with
+  `journalctl -u trump-tracker -f`.
+- **Syncthing GUI:** `https://192.168.2.10:8384` (TLS, self-signed — accept once).
+
+See [DEVLOG.md](DEVLOG.md) → "Syncthing deployment" for the full deployment picture.
+
 Because deployment doesn't depend on branch, git is purely for history + review, using a
 **Hybrid** model:
 
