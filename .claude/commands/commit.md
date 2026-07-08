@@ -44,17 +44,21 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 ```
 
 **Direct to main:**
+
 1. `git add` the intended paths, `git commit`.
 2. Ask whether to `git push` (don't assume).
 
 **Branch + PR:**
+
 1. `git switch -c <type>/<slug>` (`feat`/`fix`/`chore`/`docs` + short kebab slug).
 2. Commit as above.
 3. On confirmation: `git push -u origin <branch>`, then `gh pr create` (title = subject, body from journal).
    End the PR body with:
+
    ```
    🤖 Generated with [Claude Code](https://claude.com/claude-code)
    ```
+  
 4. Offer to run `/code-review` on the PR. Squash-merge is the intended finish — remind the user, don't auto-merge.
 
 ## 5. Clear the journal

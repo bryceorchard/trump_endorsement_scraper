@@ -98,7 +98,7 @@ Local CLI tools and repo lint configuration that support the workflow.
 <details><summary>📋 Changelog</summary>
 
 - **2026-07-06**
-  - Added a local (gitignored) `.markdownlint.json` disabling `MD033` (inline HTML) and `MD013` (line length), so the DEVLOG's `<details>`/`<sub>` and prose lines don't trip the linter.
+  - Added a local (gitignored) `.markdownlint.json` disabling `MD041` (first line h1), `MD040` (fenced block language), `MD033` (inline HTML) and `MD013` (line length), because they annoy me.
   - Installed **GitHub CLI (`gh`) 2.96.0** via Homebrew and authenticated it.
 
 </details>
