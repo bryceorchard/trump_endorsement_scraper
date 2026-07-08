@@ -58,8 +58,9 @@ The deployment target is a headless Raspberry Pi 5. To run or inspect anything t
   `~/.ssh/brycepi5` (aarch64, key-based). For non-interactive/scripted commands add
   `-o BatchMode=yes`.
 - **Project path on Pi:** `/home/bryce/project` (the synced deploy set); the app's import root is
-  `/home/bryce/project/src` — run `main.py` from there with the Pi's own `.venv` (see "Module
-  layout & import convention" and `docs/SETUP.md`).
+  `/home/bryce/project/src` — run it from there with the Pi's own root venv:
+  `cd ~/project/src && ../.venv/bin/python3 main.py` (see "Module layout & import convention" and
+  `docs/SETUP.md`). `scripts/setup.sh` creates that `.venv`.
 - **Service:** it runs under systemd as `trump-tracker`. Manage it with
   `sudo systemctl {status,restart,stop} trump-tracker` and tail logs with
   `journalctl -u trump-tracker -f`.
@@ -112,7 +113,8 @@ All configuration is environment-variable driven through `config/config.py` (re-
 There is no test suite, build step, or linter configured in this repo yet.
 
 ```bash
-pip install -r scripts/requirements.txt --break-system-packages   # or omit the flag off-Pi
+# install into a project-root virtualenv (never system Python); scripts/setup.sh does this on the Pi
+python3 -m venv .venv && .venv/bin/pip install -r scripts/requirements.txt
 
 # one-time Twitter/twscrape account registration — see docs/SETUP.md Step 5
 

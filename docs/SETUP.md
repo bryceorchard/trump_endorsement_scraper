@@ -61,9 +61,17 @@ sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE trump_tracker TO trum
 
 ## Step 3 — Install Python dependencies
 
+Install into a project-root virtualenv (kept out of the Syncthing allowlist, so the Pi builds its
+own native `.venv` — never install into system Python with `--break-system-packages`):
+
 ```bash
-pip install -r requirements.txt --break-system-packages
+sudo apt-get install -y python3-venv
+python3 -m venv .venv          # from the project root
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -r scripts/requirements.txt
 ```
+
+Then invoke the app with `.venv/bin/python3` (the commands in Steps 5–6 assume this).
 
 ---
 
@@ -106,6 +114,7 @@ Run from inside `src/` (the import root — see CLAUDE.md → "Module layout & i
 
 ```bash
 cd src
+source ../.venv/bin/activate   # the venv from Step 3
 export $(cat .env | xargs)
 
 python3 -c "
@@ -133,6 +142,7 @@ Run from inside `src/` (the import root — see CLAUDE.md → "Module layout & i
 
 ```bash
 cd src
+source ../.venv/bin/activate   # the venv from Step 3
 export $(cat .env | xargs)
 
 # 1. Initialise the database schema
@@ -166,8 +176,8 @@ User=<user_name>
 # config/database/detector/collectors packages (see CLAUDE.md → "Module layout & import convention").
 WorkingDirectory=<your_dir>/trump_stocks_project/code/src
 EnvironmentFile=<your_dir>/trump_stocks_project/code/src/.env
-ExecStart=<your_python_path>/python3 main.py
-# Example: ExecStart=/usr/bin/python3 main.py
+# Use the project-root virtualenv's interpreter (from Step 3), not system python.
+ExecStart=<your_dir>/trump_stocks_project/code/.venv/bin/python3 main.py
 Restart=on-failure
 RestartSec=30
 
