@@ -25,9 +25,9 @@ top-level imports:
 - `from database.database import ...`, `from detector.endorsement_detector import ...`.
 - Within `collectors/`, sibling imports are relative (`from .base import ...`).
 
-> `docs/SETUP.md` still shows the old flat-layout commands (`python3 endorsement_detector.py`);
-> the detector's manual-test entry point is now `python3 -m detector.endorsement_detector` (run
-> from `src/`). `python3 main.py` is unchanged.
+> The detector's manual-test entry point is `python3 -m detector.endorsement_detector` (run from
+> `src/`), not the file directly; `python3 main.py` is likewise run from `src/`. `docs/SETUP.md`
+> reflects this.
 
 ## Git & deployment workflow
 
