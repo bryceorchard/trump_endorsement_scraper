@@ -105,7 +105,7 @@ Optional fields (defaults are sensible for a Pi):
 | `DETECTION_ENABLED`     | `true`                                | Set `false` to skip LLM analysis while testing collectors    |
 | `OLLAMA_URL`            | `http://localhost:11434/api/generate` | Change if Ollama is on another machine                       |
 | `OLLAMA_MODEL`          | `qwen3:8b`                            | Model name as shown in `ollama list`                         |
-| `OLLAMA_TIMEOUT`        | `60`                                  | Seconds to wait for inference (increase if Pi is under load) |
+| `OLLAMA_TIMEOUT`        | `180`                                 | Seconds per inference; a cold call also loads the model      |
 | `DETECTION_BATCH_SIZE`  | `10`                                  | Items analyzed per detection run                             |
 | `INTERVAL_TRUTH_SOCIAL` | `300`                                 | Collection interval in seconds                               |
 | `INTERVAL_TWITTER`      | `600`                                 |                                                              |
@@ -124,7 +124,17 @@ twscrape needs at least one real Twitter account to scrape through. Set `TWITTER
 scripts/setup_twitter.sh
 ```
 
-This is a one-time step. twscrape saves session tokens locally and reuses them.
+This is a one-time step. twscrape caches session tokens in `src/accounts.db` and reuses them. The
+script (and the collector) force twscrape's `curl_cffi` backend via `TWS_HTTP_BACKEND=curl`, because
+X's Cloudflare 403s twscrape's default `httpx` client by TLS fingerprint.
+
+> **If login fails with X's `Could not log you in now` (code 399)** — that's X's own
+> anti-automation, past the Cloudflare layer, not a config error. Either wait and re-run (it's often
+> a temporary throttle), or use **browser cookies**, which is the reliable path: log in to `x.com`
+> in a browser, copy the `auth_token` and `ct0` cookies, and add a `"cookies"` field to the account
+> object in `TWITTER_ACCOUNTS_JSON` (see `src/.env.example`). twscrape won't update an account that
+> already exists, so delete `src/accounts.db` before re-running. The X/Twitter collector is
+> optional — the other three collectors run without it.
 
 ---
 

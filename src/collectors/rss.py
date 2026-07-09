@@ -48,10 +48,12 @@ def _parse_date(entry) -> Optional[datetime]:
 
 def _is_relevant(entry) -> bool:
     """Return True if the entry contains at least one filter keyword (case-insensitive)."""
+    content_blocks = getattr(entry, "content", None) or []
+    body = content_blocks[0].get("value", "") if content_blocks else ""
     text = " ".join([
         getattr(entry, "title", ""),
         getattr(entry, "summary", ""),
-        getattr(entry, "content", [{}])[0].get("value", "") if hasattr(entry, "content") else "",
+        body,
     ]).lower()
     return any(kw.lower() in text for kw in config.RSS_FILTER_KEYWORDS)
 

@@ -49,16 +49,25 @@ class EndorsementResult:
     raw_text: str
 
 
-def detect_endorsement(text: str, timeout: int = config.OLLAMA_TIMEOUT) -> EndorsementResult:
+def detect_endorsement(text: str, timeout: int | None = None) -> EndorsementResult:
     """
     Analyze text for Trump company endorsements.
 
     Args:
         text: The text to analyze (tweet, post, transcript excerpt, etc.)
-        timeout: Request timeout in seconds (inference can be slow on RPi5)
+        timeout: Request timeout in seconds (defaults to config.OLLAMA_TIMEOUT;
+                 inference is slow on an RPi5, and the first call after idle
+                 also pays the model-load time)
 
     Returns:
         EndorsementResult dataclass
+
+    Raises:
+        RuntimeError: Ollama is unreachable or the request failed (down, timed
+            out, model not pulled, 5xx). The caller should pause detection and
+            leave items unprocessed — these failures are not the item's fault.
+        ValueError: the model responded but with unparseable output; safe to
+            treat as a per-item failure.
     """
     payload = {
         "model": MODEL,
@@ -71,11 +80,24 @@ def detect_endorsement(text: str, timeout: int = config.OLLAMA_TIMEOUT) -> Endor
         },
         # Disable Qwen3's thinking mode for faster responses on simple extraction
         "think": False,
+        # Keep the model resident between detection cycles — reloading 5 GB on
+        # a Pi takes ~a minute, and Ollama's default is to unload after 5 min.
+        "keep_alive": "30m",
     }
 
     try:
-        response = requests.post(OLLAMA_URL, json=payload, timeout=timeout)
+        response = requests.post(
+            OLLAMA_URL, json=payload, timeout=timeout or config.OLLAMA_TIMEOUT
+        )
         response.raise_for_status()
+    except requests.exceptions.ConnectionError as exc:
+        raise RuntimeError("Ollama is not running. Start it with: ollama serve") from exc
+    except requests.exceptions.RequestException as exc:
+        # Timeout, HTTP 404 (model not pulled), 5xx, …
+        raise RuntimeError(f"Ollama request failed: {exc}") from exc
+
+    raw_response = ""
+    try:
         raw_response = response.json()["response"].strip()
 
         # Strip markdown code fences if model wraps output in them
@@ -85,29 +107,34 @@ def detect_endorsement(text: str, timeout: int = config.OLLAMA_TIMEOUT) -> Endor
                 raw_response = raw_response[4:]
 
         data = json.loads(raw_response)
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        raise ValueError(f"Model returned invalid JSON: {raw_response[:500]!r}") from e
 
-        return EndorsementResult(
-            endorsement_detected=data.get("endorsement_detected", False),
-            company=data.get("company"),
-            ticker=data.get("ticker"),
-            confidence=data.get("confidence", "low"),
-            quote=data.get("quote"),
-            endorsement_type=data.get("endorsement_type", "none"),
-            raw_text=text,
-        )
-
-    except requests.exceptions.ConnectionError:
-        raise RuntimeError("Ollama is not running. Start it with: ollama serve")
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Model returned invalid JSON: {raw_response}") from e
+    return EndorsementResult(
+        endorsement_detected=data.get("endorsement_detected", False),
+        company=data.get("company"),
+        ticker=data.get("ticker"),
+        confidence=data.get("confidence", "low"),
+        quote=data.get("quote"),
+        endorsement_type=data.get("endorsement_type", "none"),
+        raw_text=text,
+    )
 
 
 def is_actionable(result: EndorsementResult) -> bool:
-    """Returns True if the result warrants sending an alert."""
+    """Returns True if the result warrants sending an alert.
+
+    Requires a concrete company or ticker: an "endorsement" naming neither has
+    nothing to act on. This is what filters out the model's spurious hits on
+    general economic commentary ("Record Stock Market...") and political
+    endorsements of *people* ("he has my Complete and Total Endorsement") — both
+    of which it otherwise flags as detected with company=None, ticker=None.
+    """
     return (
         result.endorsement_detected
         and result.confidence in ("high", "medium")
         and result.endorsement_type != "none"
+        and bool(result.company or result.ticker)
     )
 
 

@@ -17,7 +17,7 @@ Run detection only (useful for testing Ollama separately):
 import argparse
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -38,6 +38,10 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("trump_tracker")
+
+# APScheduler logs every job add + every run at INFO, which buries the app's own
+# output. Keep only its warnings (missed runs, overlapping jobs skipped).
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 COLLECTORS = {
     "truth_social": TruthSocialCollector,
@@ -79,11 +83,17 @@ def run_detection():
         logger.debug("[detection] no unprocessed items.")
         return
 
-    logger.info("[detection] processing %d item(s)...", len(items))
+    total = len(items)
+    logger.info("[detection] processing %d item(s)...", total)
     analyzed = 0
     hits = 0
 
-    for item in items:
+    for idx, item in enumerate(items, 1):
+        # Per-item heartbeat: each inference takes ~30s on a Pi and only
+        # actionable hits log below, so without this the loop looks hung.
+        preview = " ".join(item["content"].split())[:70]
+        logger.info("[detection] %d/%d id=%s (%s) %r",
+                    idx, total, item["id"], item["source_name"], preview)
         try:
             result = detect_endorsement(item["content"], timeout=config.OLLAMA_TIMEOUT)
             save_endorsement(item["id"], result)
@@ -131,7 +141,7 @@ def _make_error_result(text: str):
 
 
 def run_all():
-    logger.info("=== Running all collectors at %s ===", datetime.utcnow().isoformat())
+    logger.info("=== Running all collectors at %s ===", datetime.now(timezone.utc).isoformat())
     for name in COLLECTORS:
         run_collector(name)
     run_detection()
@@ -173,36 +183,33 @@ def main():
 
     # ── Scheduled mode ───────────────────────────────────────────────────────
     scheduler = BlockingScheduler(timezone="UTC")
+    now = datetime.now(timezone.utc)   # every job also fires immediately on startup
 
-    scheduler.add_job(
-        lambda: run_collector("truth_social"),
-        IntervalTrigger(seconds=config.INTERVAL_TRUTH_SOCIAL),
-        id="truth_social",
-        next_run_time=datetime.utcnow(),   # run immediately on startup
-    )
-    scheduler.add_job(
-        lambda: run_collector("twitter"),
-        IntervalTrigger(seconds=config.INTERVAL_TWITTER),
-        id="twitter",
-        next_run_time=datetime.utcnow(),
-    )
-    scheduler.add_job(
-        lambda: run_collector("whitehouse"),
-        IntervalTrigger(seconds=config.INTERVAL_WHITEHOUSE),
-        id="whitehouse",
-        next_run_time=datetime.utcnow(),
-    )
-    scheduler.add_job(
-        lambda: run_collector("rss"),
-        IntervalTrigger(seconds=config.INTERVAL_RSS),
-        id="rss",
-        next_run_time=datetime.utcnow(),
-    )
+    # One interval job per collector. Pass the name via args + name= (rather than
+    # a lambda) so the logs read "truth_social"/"twitter"/… instead of four
+    # identical "main.<locals>.<lambda>" lines.
+    collector_intervals = {
+        "truth_social": config.INTERVAL_TRUTH_SOCIAL,
+        "twitter":      config.INTERVAL_TWITTER,
+        "whitehouse":   config.INTERVAL_WHITEHOUSE,
+        "rss":          config.INTERVAL_RSS,
+    }
+    for name, interval in collector_intervals.items():
+        scheduler.add_job(
+            run_collector,
+            IntervalTrigger(seconds=interval),
+            args=[name],
+            id=name,
+            name=name,
+            next_run_time=now,
+        )
+
     scheduler.add_job(
         run_detection,
         IntervalTrigger(seconds=config.INTERVAL_DETECTION),
         id="detection",
-        next_run_time=datetime.utcnow(),
+        name="detection",
+        next_run_time=now,
     )
 
     logger.info(

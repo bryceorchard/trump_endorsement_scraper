@@ -1,10 +1,30 @@
 """
 config.py — All configuration pulled from environment variables.
-Copy .env.example to .env and fill in values, then:
-    export $(cat .env | xargs) && python main.py
+
+Copy src/.env.example to src/.env and fill in values. The scripts/ helpers load
+it for you (scripts/_env.sh does `set -a; . src/.env; set +a`). JSON values in
+.env must be wrapped in single quotes so sourcing preserves the inner double
+quotes — see src/.env.example.
 """
 
+import json as _json
 import os
+
+
+def _json_env(name: str, default: str):
+    """Parse a JSON-valued env var, failing with the variable name and value
+    instead of an anonymous JSONDecodeError from deep inside json."""
+    raw = os.getenv(name, default)
+    try:
+        return _json.loads(raw)
+    except _json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Environment variable {name} is not valid JSON: {raw!r}\n"
+            f"In src/.env, wrap the whole value in single quotes, e.g.\n"
+            f"    {name}='[\"a\",\"b\"]'\n"
+            f"so shell sourcing keeps the inner double quotes intact "
+            f"(see src/.env.example)."
+        ) from exc
 
 # ── Database ────────────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost/trump_tracker")
@@ -27,21 +47,24 @@ WHITEHOUSE_BASE_URL   = os.getenv("WHITEHOUSE_BASE_URL", "https://www.whitehouse
 WHITEHOUSE_LIMIT      = int(os.getenv("WHITEHOUSE_LIMIT", "20"))  # articles per run
 
 # ── RSS / News ────────────────────────────────────────────────────────────────
-# Default feeds — override by setting RSS_FEEDS_JSON to a JSON list of URLs
-import json as _json
+# Default feeds — override by setting RSS_FEEDS_JSON to a JSON list of URLs.
+# (Reuters shut its public RSS feeds down and c-span.org/rss/ is 410 Gone —
+# all of these were verified live 2026-07.)
 _default_feeds = _json.dumps([
-    "https://feeds.reuters.com/reuters/politicsNews",
     "https://feeds.foxnews.com/foxnews/politics",
     "http://rss.cnn.com/rss/cnn_allpolitics.rss",
     "https://feeds.npr.org/1014/rss.xml",            # NPR Politics
     "https://rss.politico.com/politics-news.xml",
     "https://thehill.com/feed/",
-    "https://www.c-span.org/rss/",
+    "https://abcnews.go.com/abcnews/politicsheadlines",
+    "https://www.cbsnews.com/latest/rss/politics",
+    "https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml",
+    "https://www.theguardian.com/us-news/us-politics/rss",
 ])
-RSS_FEEDS: list[str] = _json.loads(os.getenv("RSS_FEEDS_JSON", _default_feeds))
+RSS_FEEDS: list[str] = _json_env("RSS_FEEDS_JSON", _default_feeds)
 # Keywords used to filter RSS items — only items containing at least one are saved
-RSS_FILTER_KEYWORDS: list[str] = _json.loads(
-    os.getenv("RSS_FILTER_KEYWORDS", '["trump", "donald"]')
+RSS_FILTER_KEYWORDS: list[str] = _json_env(
+    "RSS_FILTER_KEYWORDS", '["trump", "donald"]'
 )
 
 # ── Scheduler intervals (seconds) ─────────────────────────────────────────────
@@ -65,5 +88,7 @@ USER_AGENT = os.getenv(
 DETECTION_ENABLED    = os.getenv("DETECTION_ENABLED", "true").lower() == "true"
 OLLAMA_URL           = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
 OLLAMA_MODEL         = os.getenv("OLLAMA_MODEL", "qwen3:8b")
-OLLAMA_TIMEOUT       = int(os.getenv("OLLAMA_TIMEOUT", "60"))   # seconds per inference
+OLLAMA_TIMEOUT       = int(os.getenv("OLLAMA_TIMEOUT", "180"))  # seconds per inference —
+# generous because the first call after idle also loads the model into RAM,
+# which on a Pi 5 can take a minute by itself
 DETECTION_BATCH_SIZE = int(os.getenv("DETECTION_BATCH_SIZE", "10"))  # items per detection run

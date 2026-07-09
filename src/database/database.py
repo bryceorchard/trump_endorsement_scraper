@@ -8,14 +8,15 @@ Tables:
   endorsements     — LLM detection results, one row per analyzed item
 """
 
-import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost/trump_tracker")
+from config import config
+
+DATABASE_URL = config.DATABASE_URL
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -116,12 +117,18 @@ def init_db():
     print("Database initialised.")
 
 
+_source_id_cache: dict[str, int] = {}
+
+
 def get_source_id(source_name: str) -> int:
+    if source_name in _source_id_cache:
+        return _source_id_cache[source_name]
     with db_cursor() as cur:
         cur.execute("SELECT id FROM sources WHERE name = %s", (source_name,))
         row = cur.fetchone()
         if row is None:
             raise ValueError(f"Unknown source: {source_name}")
+        _source_id_cache[source_name] = row["id"]
         return row["id"]
 
 
@@ -141,7 +148,9 @@ def upsert_item(
     import json
 
     source_id = get_source_id(source_name)
-    raw = json.dumps(raw_json) if raw_json is not None else None
+    # default=str keeps a stray datetime/Decimal in a payload from failing the
+    # whole upsert — raw_json is archival, lossy stringification is fine.
+    raw = json.dumps(raw_json, default=str) if raw_json is not None else None
 
     with db_cursor() as cur:
         cur.execute(
