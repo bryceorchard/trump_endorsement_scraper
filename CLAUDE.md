@@ -102,7 +102,7 @@ Maintain a running journal of uncommitted work in `.claude/pending-changes.md` (
 
 ## Configuration
 
-All configuration is environment-variable driven through `config/config.py` (re-implemented with defaults — there's no `.env`-loading code in the module itself; load `.env` via `export $(cat .env | xargs)` or `python-dotenv` before running). `src/.env.example` documents the variables. Notable ones:
+All configuration is environment-variable driven through `config/config.py` (re-implemented with defaults — there's no `.env`-loading code in the module itself). The `scripts/` helper scripts load `src/.env` for you (via `scripts/_env.sh`, which does `set -a; . src/.env; set +a`); to run the app by hand instead, load it the same way or use `python-dotenv` before running. `src/.env.example` documents the variables (JSON values are single-quoted so they survive sourcing). Notable ones:
 
 - `DETECTION_ENABLED=false` — run collectors without Ollama running (useful while Ollama isn't set up yet).
 - `TWITTER_ACCOUNTS_JSON` — required for the Twitter collector; `twscrape` needs at least one real, already-registered Twitter account.

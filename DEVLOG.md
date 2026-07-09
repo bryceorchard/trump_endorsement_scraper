@@ -108,20 +108,24 @@ Local CLI tools and repo lint configuration that support the workflow.
 
 ## 5. Pi environment (setup.sh)
 
-`scripts/setup.sh` provisions a fresh Raspberry Pi 5 for the pipeline: Ollama + the `qwen3:8b` model, PostgreSQL (db/user/grants), the Python dependencies, a scaffolded `.env`, and a printed twscrape account-registration step. It's re-runnable — each step no-ops or reuses if already done.
+`scripts/setup.sh` provisions a fresh Raspberry Pi 5 for the pipeline — Ollama + the `qwen3:8b` model, PostgreSQL, the Python virtualenv, and a scaffolded `src/.env` — then hands off to a set of small helper scripts for the remaining steps. It's safe to re-run: every step **skips or reuses** work that's already done.
 
 **How it works.**
 
 - **Self-locating:** resolves `SCRIPT_DIR`/`PROJECT_ROOT`/`SRC_DIR`/`VENV` from `${BASH_SOURCE[0]}`, so it runs correctly from any cwd (not just the dir it happens to sit in).
-- **Project-root virtualenv:** Python deps install into `$PROJECT_ROOT/.venv` (`/home/bryce/project/.venv` on the Pi), **never** system Python. Root placement keeps the venv outside the Syncthing allowlist (`/src /scripts /test`), so ARM binaries never sync — this is the concrete mechanism behind Chapter 3's "the Pi builds its own `.venv`" golden rule. Run the app with `.venv/bin/python3` (systemd's `ExecStart` and the `docs/SETUP.md` commands do this).
-- **`.env` scaffold:** copies `src/.env.example` → `src/.env` (the app reads env from `src/`); left for you to fill in.
+- **Idempotent throughout:** installs Ollama only if missing and waits for its systemd service to accept connections before pulling (avoids a startup race); pulls `qwen3:8b` only if absent; installs Postgres only if `psql` is missing; reuses an existing `.venv`; and (re)installs dependencies only when `requirements.txt` changed since last time (a `sha256` stamp in the venv).
+- **Postgres:** prompts (hidden, confirmed) for the DB password, and if a `trump_tracker` database/role already exists offers **keep / reset-password / drop-and-recreate** (the destructive option is gated behind typing `DROP`). Writes `DATABASE_URL` into `src/.env` to match, and grants schema-`public` create rights (needed on bookworm's PostgreSQL 15+).
+- **Project-root virtualenv:** Python deps install into `$PROJECT_ROOT/.venv` (`/home/bryce/project/.venv` on the Pi), **never** system Python. Root placement keeps the venv outside the Syncthing allowlist (`/src /scripts /test`), so ARM binaries never sync — the concrete mechanism behind Chapter 3's "the Pi builds its own `.venv`" golden rule.
+- **Helper scripts (`scripts/`):** `_env.sh` is a shared **sourced** bootstrap (resolves the venv/src paths and loads `src/.env` via `set -a; . src/.env; set +a`); the runnable ones are `setup_twitter.sh` (twscrape registration), `run_once.sh` (init DB + one collect/detect pass), `test_detector.sh`, and `start.sh` (the blocking scheduler — what the `trump-tracker` systemd service runs via `ExecStart`). JSON values in `.env` are single-quoted so sourcing preserves them intact.
 
 <details><summary>📋 Changelog</summary>
 
 - **2026-07-08**
+  - Pointed `docs/SETUP.md` at the helper scripts, switched the systemd unit to `ExecStart=…/scripts/start.sh`, and fixed the stale `.env.example` DATABASE_URL role + Step 2 SQL (`CREATE ROLE` + schema grant). Retired the broken `export $(cat .env | xargs)` advice everywhere.
+  - Replaced the printed "next steps" with helper scripts (`_env.sh`, `setup_twitter.sh`, `run_once.sh`, `test_detector.sh`, `start.sh`); switched `.env` loading to `set -a; source` with single-quoted JSON in `.env.example` (fixes the old `xargs` quote-stripping). Merged as PR #4.
+  - Made setup.sh idempotent end-to-end (skip Ollama install/model-pull, wait for the Ollama server, install Postgres only if absent, reuse the venv, skip deps unless `requirements.txt` changed) and added a DB-password prompt with existing-database detection (keep / reset / drop-and-recreate) + the PG15 `GRANT ALL ON SCHEMA public`. Merged as PR #4.
   - Replaced `pip install --break-system-packages` (system Python, overrides PEP 668) with a project-root `.venv` built via `python3 -m venv`; added the `python3-venv` apt dependency. Merged as PR #3.
   - Made the script self-locating (`SCRIPT_DIR`/`PROJECT_ROOT`) so it no longer depends on cwd; corrected the `.env` path to `src/.env`; de-staled the printed run commands (`from config import config`, `python3 -m detector.endorsement_detector`, run from `src/` with the venv Python).
-  - Kept `docs/SETUP.md` and `CLAUDE.md` in step (venv-based install, systemd `ExecStart` → `.venv/bin/python3`).
 
 </details>
 

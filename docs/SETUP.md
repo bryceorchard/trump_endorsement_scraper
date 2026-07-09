@@ -46,16 +46,25 @@ At 4-bit quantization it uses ~5.5 GB of RAM, leaving plenty of headroom on the 
 
 ## Step 2 — Set up PostgreSQL
 
+> `scripts/setup.sh` does all of this for you — it prompts for the DB password, detects an existing
+> database (offering keep / reset-password / drop-and-recreate), and writes `DATABASE_URL` into
+> `src/.env`. The commands below are the manual equivalent.
+
 ```bash
 sudo apt-get install -y postgresql postgresql-contrib
 sudo systemctl enable postgresql
 sudo systemctl start postgresql
 
-# Create the database and user
+# Create the database and role
 sudo -u postgres psql -c "CREATE DATABASE trump_tracker;"
-sudo -u postgres psql -c "CREATE USER trump_tracker_user WITH PASSWORD 'yourpassword';"
+sudo -u postgres psql -c "CREATE ROLE trump_tracker_user LOGIN PASSWORD 'yourpassword';"
 sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE trump_tracker TO trump_tracker_user;"
+# PostgreSQL 15+ (bookworm's default) needs an explicit grant to create tables in schema public;
+# this must run inside the target database:
+sudo -u postgres psql -d trump_tracker -c "GRANT ALL ON SCHEMA public TO trump_tracker_user;"
 ```
+
+Then set `DATABASE_URL` in `src/.env` to match (`postgresql://trump_tracker_user:yourpassword@localhost/trump_tracker`).
 
 ---
 
@@ -108,28 +117,11 @@ Optional fields (defaults are sensible for a Pi):
 
 ## Step 5 — Register Twitter accounts (twscrape)
 
-twscrape needs at least one real Twitter account to scrape through. Set `TWITTER_ACCOUNTS_JSON` in `.env` first, then run:
-
-Run from inside `src/` (the import root — see CLAUDE.md → "Module layout & import convention"):
+twscrape needs at least one real Twitter account to scrape through. Set `TWITTER_ACCOUNTS_JSON` in
+`src/.env` first, then run the helper (it loads `src/.env` and uses the venv's Python for you):
 
 ```bash
-cd src
-source ../.venv/bin/activate   # the venv from Step 3
-export $(cat .env | xargs)
-
-python3 -c "
-import asyncio, json
-from config import config
-from twscrape import AccountsPool
-
-async def add():
-    pool = AccountsPool()
-    for acc in json.loads(config.TWITTER_ACCOUNTS_JSON):
-        await pool.add_account(**acc)
-    await pool.login_all()
-
-asyncio.run(add())
-"
+scripts/setup_twitter.sh
 ```
 
 This is a one-time step. twscrape saves session tokens locally and reuses them.
@@ -138,25 +130,15 @@ This is a one-time step. twscrape saves session tokens locally and reuses them.
 
 ## Step 6 — Verify the pipeline
 
-Run from inside `src/` (the import root — see CLAUDE.md → "Module layout & import convention"):
+The helper scripts each load `src/.env`, `cd` into `src/`, and run with the venv's Python:
 
 ```bash
-cd src
-source ../.venv/bin/activate   # the venv from Step 3
-export $(cat .env | xargs)
-
-# 1. Initialise the database schema
-python3 main.py --run-once
-
-# 2. Test a single collector
-python3 main.py --collector truth_social
-
-# 3. Test the endorsement detector directly (requires Ollama running)
-python3 -m detector.endorsement_detector
-
-# 4. Test detection on whatever is already in the DB
-python3 main.py --detect-only
+scripts/run_once.sh        # initialise the DB schema + run all collectors + detection once
+scripts/test_detector.sh   # test the endorsement detector directly (requires Ollama running)
 ```
+
+For finer-grained checks you can still call the CLI directly (from `src/`, with the venv active and
+`src/.env` loaded), e.g. `python3 main.py --collector truth_social` or `python3 main.py --detect-only`.
 
 ---
 
@@ -172,12 +154,10 @@ After=network.target postgresql.service ollama.service
 [Service]
 Type=simple
 User=<user_name>
-# WorkingDirectory must be src/ — it's the import root, so `main.py` resolves the
-# config/database/detector/collectors packages (see CLAUDE.md → "Module layout & import convention").
-WorkingDirectory=<your_dir>/trump_stocks_project/code/src
-EnvironmentFile=<your_dir>/trump_stocks_project/code/src/.env
-# Use the project-root virtualenv's interpreter (from Step 3), not system python.
-ExecStart=<your_dir>/trump_stocks_project/code/.venv/bin/python3 main.py
+# start.sh cd's into src/, loads src/.env, and runs the scheduler with the venv's Python — so no
+# WorkingDirectory / EnvironmentFile / interpreter path is needed here, and .env is loaded the same
+# (bash source) way as everything else.
+ExecStart=<your_dir>/trump_stocks_project/code/scripts/start.sh
 Restart=on-failure
 RestartSec=30
 
