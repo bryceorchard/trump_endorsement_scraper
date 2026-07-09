@@ -84,9 +84,14 @@ class WhiteHouseCollector(BaseCollector):
         for path in FEED_PATHS:
             feed_url = urljoin(config.WHITEHOUSE_BASE_URL, path)
             try:
-                feed = feedparser.parse(feed_url, agent=config.USER_AGENT)
+                # Fetch via requests (with a timeout) rather than letting
+                # feedparser.parse(url) do an untimed urllib fetch that can hang
+                # the whole run on a stalled feed.
+                resp = self.session.get(feed_url, timeout=config.REQUEST_TIMEOUT)
+                resp.raise_for_status()
+                feed = feedparser.parse(resp.content)
             except Exception as exc:
-                logger.warning("[whitehouse] failed to parse feed %s: %s", feed_url, exc)
+                logger.warning("[whitehouse] failed to fetch/parse feed %s: %s", feed_url, exc)
                 continue
 
             if feed.get("bozo") and not feed.entries:

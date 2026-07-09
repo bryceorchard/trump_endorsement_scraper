@@ -95,42 +95,53 @@ class TruthSocialCollector(BaseCollector):
                 )
             raise
 
+        # A 200 carrying a Cloudflare challenge or an error object isn't the
+        # expected list of statuses — bail cleanly rather than iterating dict keys.
+        if not isinstance(statuses, list):
+            logger.warning("[truth_social] unexpected API response (not a list) — skipping run")
+            return []
+
         for status in statuses:
-            content_html = status.get("content", "")
-            content_text = _strip_html(content_html)
+            # Isolate each status: one malformed post must not discard the rest.
+            try:
+                content_html = status.get("content", "")
+                content_text = _strip_html(content_html)
 
-            # Include reblogs (re-truths) — unwrap the reblogged content
-            if not content_text and status.get("reblog"):
-                rb = status["reblog"]
-                content_text = _strip_html(rb.get("content", ""))
+                # Include reblogs (re-truths) — unwrap the reblogged content
+                if not content_text and status.get("reblog"):
+                    rb = status["reblog"]
+                    content_text = _strip_html(rb.get("content", ""))
 
-            if not content_text:
-                continue  # media-only post, skip
+                if not content_text:
+                    continue  # media-only post, skip
 
-            published_raw = status.get("created_at")
-            published_at = None
-            if published_raw:
-                try:
-                    published_at = datetime.fromisoformat(
-                        published_raw.replace("Z", "+00:00")
-                    )
-                except ValueError:
-                    pass
+                published_raw = status.get("created_at")
+                published_at = None
+                if published_raw:
+                    try:
+                        published_at = datetime.fromisoformat(
+                            published_raw.replace("Z", "+00:00")
+                        )
+                    except ValueError:
+                        pass
 
-            post_url = status.get("url") or (
-                f"{config.TRUTH_SOCIAL_BASE_URL}/@realDonaldTrump/{status['id']}"
-            )
-
-            items.append(
-                CollectedItem(
-                    external_id=str(status["id"]),
-                    content=content_text,
-                    url=post_url,
-                    author="realDonaldTrump",
-                    published_at=published_at,
-                    raw_json=status,
+                post_url = status.get("url") or (
+                    f"{config.TRUTH_SOCIAL_BASE_URL}/@realDonaldTrump/{status['id']}"
                 )
-            )
+
+                items.append(
+                    CollectedItem(
+                        external_id=str(status["id"]),
+                        content=content_text,
+                        url=post_url,
+                        author="realDonaldTrump",
+                        published_at=published_at,
+                        raw_json=status,
+                    )
+                )
+            except Exception as exc:
+                logger.warning("[truth_social] skipping malformed status: %s", exc)
+                continue
 
         logger.debug("[truth_social] fetched %d posts", len(items))
         return items

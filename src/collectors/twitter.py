@@ -42,17 +42,16 @@ os.environ.setdefault("TWS_HTTP_BACKEND", "curl")
 
 
 def _run_async(coro):
-    """Run an async coroutine from sync context."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, coro)
-                return future.result()
-        return loop.run_until_complete(coro)
-    except RuntimeError:
-        return asyncio.run(coro)
+    """Run an async coroutine from sync context.
+
+    Collectors are always invoked from a plain sync context — an APScheduler
+    worker thread or the CLI main thread — never from inside a running event
+    loop, so a fresh loop per call is correct. (The old version caught
+    RuntimeError around run_until_complete and retried via asyncio.run, which
+    re-ran the whole coroutine when the *work* raised RuntimeError — a silent
+    double fetch — and leaked the auto-created loop.)
+    """
+    return asyncio.run(coro)
 
 
 class TwitterCollector(BaseCollector):

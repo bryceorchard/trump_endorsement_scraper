@@ -62,19 +62,21 @@ class RSSCollector(BaseCollector):
     source_name = "rss"
 
     def __init__(self):
-        # feedparser uses its own HTTP stack but respects User-Agent via a kwarg
-        self._ua = config.USER_AGENT
+        # Fetch feeds ourselves so we control the timeout — feedparser.parse(url)
+        # does its own urllib fetch with NO timeout, so a stalled feed body hangs
+        # the whole collector thread forever (and the scheduler then coalesces it
+        # away, silently killing this source until restart).
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": config.USER_AGENT})
 
     def _fetch_feed(self, feed_url: str) -> list[CollectedItem]:
         """Parse a single RSS/Atom feed and return relevant items."""
         try:
-            feed = feedparser.parse(
-                feed_url,
-                agent=self._ua,
-                request_headers={"User-Agent": self._ua},
-            )
+            resp = self.session.get(feed_url, timeout=config.REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            feed = feedparser.parse(resp.content)
         except Exception as exc:
-            logger.warning("[rss] failed to parse feed %s: %s", feed_url, exc)
+            logger.warning("[rss] failed to fetch/parse feed %s: %s", feed_url, exc)
             return []
 
         if feed.get("bozo") and not feed.entries:

@@ -19,6 +19,27 @@ from config import config
 OLLAMA_URL = config.OLLAMA_URL
 MODEL      = config.OLLAMA_MODEL
 
+# Placeholder strings the model may emit instead of JSON null (the prompt below
+# literally says "or null"), normalized to None so they don't count as a real
+# company/ticker or pollute the DB.
+_NULLISH = {"", "null", "none", "n/a", "n.a.", "unknown"}
+
+
+class DetectionTimeout(Exception):
+    """The Ollama call for a single item timed out.
+
+    Distinct from RuntimeError (which pauses detection): the caller treats this
+    as an item-level failure and moves on, so one over-long item can't wedge the
+    whole queue. A genuinely-down Ollama surfaces as ConnectionError instead.
+    """
+
+
+def _nullish_to_none(value):
+    if isinstance(value, str) and value.strip().lower() in _NULLISH:
+        return None
+    return value
+
+
 SYSTEM_PROMPT = """You are an AI that analyzes statements made by Donald Trump and detects whether he is endorsing or promoting a specific company, brand, or financial asset (stocks, crypto, etc.).
 
 Respond ONLY with valid JSON in this exact format:
@@ -92,8 +113,15 @@ def detect_endorsement(text: str, timeout: int | None = None) -> EndorsementResu
         response.raise_for_status()
     except requests.exceptions.ConnectionError as exc:
         raise RuntimeError("Ollama is not running. Start it with: ollama serve") from exc
+    except requests.exceptions.Timeout as exc:
+        # A single call timing out usually means THIS item is too long, not that
+        # Ollama is down — raise a distinct type so the caller skips the item
+        # rather than pausing the loop (which would wedge forever on a poison item).
+        raise DetectionTimeout(
+            f"Ollama timed out after {timeout or config.OLLAMA_TIMEOUT}s"
+        ) from exc
     except requests.exceptions.RequestException as exc:
-        # Timeout, HTTP 404 (model not pulled), 5xx, …
+        # HTTP 404 (model not pulled), 5xx, other transport errors → pause.
         raise RuntimeError(f"Ollama request failed: {exc}") from exc
 
     raw_response = ""
@@ -112,10 +140,10 @@ def detect_endorsement(text: str, timeout: int | None = None) -> EndorsementResu
 
     return EndorsementResult(
         endorsement_detected=data.get("endorsement_detected", False),
-        company=data.get("company"),
-        ticker=data.get("ticker"),
+        company=_nullish_to_none(data.get("company")),
+        ticker=_nullish_to_none(data.get("ticker")),
         confidence=data.get("confidence", "low"),
-        quote=data.get("quote"),
+        quote=_nullish_to_none(data.get("quote")),
         endorsement_type=data.get("endorsement_type", "none"),
         raw_text=text,
     )

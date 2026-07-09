@@ -24,7 +24,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from config import config
 from database.database import init_db, get_unprocessed_items, save_endorsement
-from detector.endorsement_detector import detect_endorsement, is_actionable
+from detector.endorsement_detector import detect_endorsement, is_actionable, DetectionTimeout
 from collectors import (
     TruthSocialCollector,
     TwitterCollector,
@@ -115,9 +115,15 @@ def run_detection():
                     logger.warning('   Quote: "%s"', result.quote)
 
         except RuntimeError as exc:
-            # Ollama not running — stop the detection loop, don't mark item processed
+            # Ollama unreachable / misconfigured — stop the loop, leave items
+            # unprocessed so they're retried once the server is back.
             logger.error("[detection] %s — pausing detection.", exc)
             break
+        except DetectionTimeout as exc:
+            # This one item is too slow (not a server outage) — mark it processed
+            # and move on, so it can't wedge the queue and starve newer items.
+            logger.warning("[detection] item %s timed out (%s) — skipping.", item["id"], exc)
+            save_endorsement(item["id"], _make_error_result(item["content"]))
         except Exception as exc:
             logger.warning("[detection] error on item %s: %s", item["id"], exc)
             # Still mark processed so we don't retry a permanently broken item
