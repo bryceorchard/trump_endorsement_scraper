@@ -117,6 +117,9 @@ if [ -n "$DB_PASSWORD" ]; then
 fi
 
 sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE trump_tracker TO trump_tracker_user;" 2>/dev/null || true
+# PostgreSQL 15+ (the Pi's bookworm default) no longer lets non-owners create objects in
+# schema public by default, so grant it explicitly (must run inside the target database).
+sudo -u postgres psql -d trump_tracker -c "GRANT ALL ON SCHEMA public TO trump_tracker_user;" 2>/dev/null || true
 echo "  PostgreSQL ready (database 'trump_tracker', role 'trump_tracker_user')."
 
 # ── 3. Python dependencies (in a virtualenv) ──────────────────────────────────
@@ -146,20 +149,28 @@ echo ""
 
 # ── 4. Environment file ───────────────────────────────────────────────────────
 echo "[4/5] Setting up .env..."
+NEW_ENV=false
 if [ ! -f "$SRC_DIR/.env" ]; then
     cp "$SRC_DIR/.env.example" "$SRC_DIR/.env"
-    if [ -n "$DB_PASSWORD" ]; then
-        # Point DATABASE_URL at the password we just set (| delimiter: URL has /).
-        DB_PASSWORD_URL=$(python3 -c 'import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$DB_PASSWORD")
-        sed -i "s|^DATABASE_URL=.*|DATABASE_URL=postgresql://trump_tracker_user:${DB_PASSWORD_URL}@localhost/trump_tracker|" "$SRC_DIR/.env"
-        echo "  Created $SRC_DIR/.env from .env.example, with DATABASE_URL set to your DB password."
-    else
-        echo "  Created $SRC_DIR/.env from .env.example — set DATABASE_URL's password yourself"
-        echo "    (kept the existing DB password, which this script doesn't know)."
-    fi
-    echo "  !! Still edit it to fill in your Twitter credentials before running."
+    NEW_ENV=true
+fi
+
+if [ -n "$DB_PASSWORD" ]; then
+    # We set the DB password (fresh/reset/recreate), so DATABASE_URL must match it.
+    # Only this one line is rewritten — any other .env customisations are preserved.
+    # (| sed delimiter because the URL contains /.)
+    DB_PASSWORD_URL=$(python3 -c 'import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$DB_PASSWORD")
+    sed -i "s|^DATABASE_URL=.*|DATABASE_URL=postgresql://trump_tracker_user:${DB_PASSWORD_URL}@localhost/trump_tracker|" "$SRC_DIR/.env"
+    echo "  Set DATABASE_URL in $SRC_DIR/.env to the DB password you just chose."
+elif $NEW_ENV; then
+    echo "  Created $SRC_DIR/.env from .env.example — set DATABASE_URL's password yourself"
+    echo "    (kept the existing DB password, which this script doesn't know)."
 else
-    echo "  $SRC_DIR/.env already exists, leaving it untouched (DATABASE_URL not modified)."
+    echo "  $SRC_DIR/.env already exists and the DB password was unchanged; left it untouched."
+fi
+
+if $NEW_ENV; then
+    echo "  !! Also edit $SRC_DIR/.env to fill in your Twitter credentials before running."
 fi
 echo ""
 

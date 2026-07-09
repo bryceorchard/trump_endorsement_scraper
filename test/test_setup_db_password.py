@@ -177,6 +177,7 @@ def test_fresh_password_is_escaped_and_encoded(tmp_path):
 
     assert _alter_line(sql_log) == f"ALTER ROLE trump_tracker_user PASSWORD '{pw.replace(chr(39), chr(39) * 2)}';"
     assert "CREATE DATABASE trump_tracker;" in sql_log
+    assert "GRANT ALL ON SCHEMA public TO trump_tracker_user;" in sql_log  # PG15+ needs this
     assert _database_url(env_text) == _expected_url(pw)
     assert "install -r" in pip_log  # deps installed on a fresh venv
 
@@ -189,12 +190,19 @@ def test_fresh_prompt_reprompts_on_empty_and_mismatch(tmp_path):
     assert _database_url(env_text) == _expected_url(pw)
 
 
-def test_existing_env_is_left_untouched(tmp_path):
-    original = "DATABASE_URL=postgresql://preexisting:DONOTCHANGE@localhost/trump_tracker\n"
-    sql_log, env_text, _ = _run_setup(tmp_path, "newpass\nnewpass\n", preexisting_env=original)
+def test_existing_env_database_url_updated_but_other_lines_preserved(tmp_path):
+    # When we set a password, an existing .env's DATABASE_URL is rewritten to match,
+    # but unrelated lines are left alone (only the ^DATABASE_URL= line is touched).
+    original = (
+        "DATABASE_URL=postgresql://old:OLDPASS@localhost/trump_tracker\n"
+        "TWITTER_TARGET_USER=someoneElse\n"
+    )
+    pw = "newpass"
+    sql_log, env_text, _ = _run_setup(tmp_path, f"{pw}\n{pw}\n", preexisting_env=original)
 
-    assert _alter_line(sql_log) == "ALTER ROLE trump_tracker_user PASSWORD 'newpass';"
-    assert _database_url(env_text) == "postgresql://preexisting:DONOTCHANGE@localhost/trump_tracker"
+    assert _alter_line(sql_log) == f"ALTER ROLE trump_tracker_user PASSWORD '{pw}';"
+    assert _database_url(env_text) == _expected_url(pw)          # rewritten to the new password
+    assert "TWITTER_TARGET_USER=someoneElse" in env_text          # unrelated line preserved
 
 
 # ── Idempotency ───────────────────────────────────────────────────────────────
@@ -226,6 +234,27 @@ def test_detected_reset_password(tmp_path):
     assert _database_url(env_text) == _expected_url(pw)
 
 
+def test_detected_reset_updates_existing_env(tmp_path):
+    # Reset with a pre-existing .env must update DATABASE_URL to the new password
+    # (regression guard for the stale-.env bug).
+    original = "DATABASE_URL=postgresql://trump_tracker_user:OLDPASS@localhost/trump_tracker\n"
+    pw = "res3t@me"
+    _, env_text, _ = _run_setup(tmp_path, f"2\n{pw}\n{pw}\n",
+                                db_exists=True, role_exists=True, preexisting_env=original)
+
+    assert _database_url(env_text) == _expected_url(pw)
+
+
+def test_detected_keep_leaves_existing_env_untouched(tmp_path):
+    # Keep (no password change) must not rewrite an existing .env's DATABASE_URL.
+    original = "DATABASE_URL=postgresql://trump_tracker_user:KEEPME@localhost/trump_tracker\n"
+    sql_log, env_text, _ = _run_setup(tmp_path, "1\n",
+                                      db_exists=True, role_exists=True, preexisting_env=original)
+
+    assert "ALTER ROLE" not in sql_log
+    assert _database_url(env_text) == "postgresql://trump_tracker_user:KEEPME@localhost/trump_tracker"
+
+
 def test_detected_drop_and_recreate_when_confirmed(tmp_path):
     pw = "brandnew1"
     sql_log, _, _ = _run_setup(tmp_path, f"3\nDROP\n{pw}\n{pw}\n", db_exists=True, role_exists=True)
@@ -249,10 +278,12 @@ if __name__ == "__main__":
     tests = [
         test_fresh_password_is_escaped_and_encoded,
         test_fresh_prompt_reprompts_on_empty_and_mismatch,
-        test_existing_env_is_left_untouched,
+        test_existing_env_database_url_updated_but_other_lines_preserved,
         test_deps_skipped_when_requirements_unchanged,
         test_detected_keep_leaves_password_and_db_alone,
         test_detected_reset_password,
+        test_detected_reset_updates_existing_env,
+        test_detected_keep_leaves_existing_env_untouched,
         test_detected_drop_and_recreate_when_confirmed,
         test_detected_drop_aborts_without_confirmation,
     ]
