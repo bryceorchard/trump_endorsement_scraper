@@ -23,7 +23,12 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from config import config
-from database.database import init_db, get_unprocessed_items, save_endorsement
+from database.database import (
+    init_db,
+    get_unprocessed_items,
+    save_endorsement,
+    record_detection_attempt,
+)
 from detector.endorsement_detector import detect_endorsement, is_actionable, DetectionTimeout
 from collectors import (
     TruthSocialCollector,
@@ -120,16 +125,26 @@ def run_detection():
             logger.error("[detection] %s — pausing detection.", exc)
             break
         except DetectionTimeout as exc:
-            # A single call timed out. This is usually transient — a cold model
-            # load (~a minute on the Pi after an idle gap) or momentary overload,
-            # not a poison item. So DON'T mark it processed: leave it for a later
-            # cycle to retry once the model is warm, and just `continue` to the
-            # next item so one slow call can't wedge the batch. (A genuinely
-            # always-timing-out item costs one retry per cycle but is never
-            # silently written off as "no endorsement".)
-            logger.warning(
-                "[detection] item %s timed out (%s) — leaving for retry.", item["id"], exc
-            )
+            # A single call timed out. Usually transient — a cold model load
+            # (~a minute on the Pi after an idle gap) or momentary overload — so
+            # we retry rather than silently write the item off as "no
+            # endorsement". But bound the retries: a genuinely too-long "poison"
+            # item that always times out would otherwise sit unprocessed forever
+            # and, since the batch is oldest-first, fill every batch and starve
+            # newer items. After DETECTION_MAX_ATTEMPTS we give up and mark it
+            # processed so the queue keeps moving.
+            attempts = record_detection_attempt(item["id"])
+            if attempts >= config.DETECTION_MAX_ATTEMPTS:
+                logger.warning(
+                    "[detection] item %s timed out %d× (%s) — giving up, marking processed.",
+                    item["id"], attempts, exc,
+                )
+                save_endorsement(item["id"], _make_error_result(item["content"]))
+            else:
+                logger.warning(
+                    "[detection] item %s timed out (%s) — leaving for retry (%d/%d).",
+                    item["id"], exc, attempts, config.DETECTION_MAX_ATTEMPTS,
+                )
             continue
         except Exception as exc:
             logger.warning("[detection] error on item %s: %s", item["id"], exc)

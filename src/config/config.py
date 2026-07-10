@@ -92,3 +92,8 @@ OLLAMA_TIMEOUT       = int(os.getenv("OLLAMA_TIMEOUT", "180"))  # seconds per in
 # generous because the first call after idle also loads the model into RAM,
 # which on a Pi 5 can take a minute by itself
 DETECTION_BATCH_SIZE = int(os.getenv("DETECTION_BATCH_SIZE", "10"))  # items per detection run
+# How many times a single item may time out in the detector before we give up
+# and mark it processed. Bounds retries so a transient cold-model-load timeout
+# gets another chance, but a genuinely-too-long "poison" item can't retry
+# forever and starve newer items out of the batch.
+DETECTION_MAX_ATTEMPTS = int(os.getenv("DETECTION_MAX_ATTEMPTS", "3"))

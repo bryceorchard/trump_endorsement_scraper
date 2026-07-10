@@ -52,6 +52,9 @@ CREATE TABLE IF NOT EXISTS collection_runs (
 
 -- Track which items have been run through the endorsement detector
 ALTER TABLE items ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
+-- Count detector timeouts per item so a poison item can be given up on after a
+-- bounded number of retries instead of being retried forever.
+ALTER TABLE items ADD COLUMN IF NOT EXISTS detection_attempts INTEGER NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_items_published  ON items (published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_items_source     ON items (source_id);
@@ -225,6 +228,20 @@ def get_unprocessed_items(batch_size: int = 50) -> list[dict]:
             (batch_size,),
         )
         return [dict(row) for row in cur.fetchall()]
+
+
+def record_detection_attempt(item_id: int) -> int:
+    """Increment the item's detector-timeout counter and return the new count.
+
+    Used to bound retries of items that keep timing out (see run_detection).
+    """
+    with db_cursor() as cur:
+        cur.execute(
+            "UPDATE items SET detection_attempts = detection_attempts + 1 "
+            "WHERE id = %s RETURNING detection_attempts",
+            (item_id,),
+        )
+        return cur.fetchone()["detection_attempts"]
 
 
 def save_endorsement(item_id: int, result) -> None:
