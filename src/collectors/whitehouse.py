@@ -12,17 +12,18 @@ entry doesn't, we fetch the article page and extract `div.entry-content`
 (selector verified against the live site, 2026-07).
 """
 
-import hashlib
 import logging
 from urllib.parse import urljoin
 
-import feedparser
 import requests
 from bs4 import BeautifulSoup
 
 from config import config
+from database.database import item_exists
 from .base import BaseCollector, CollectedItem
-from .rss import _parse_date  # feedparser entries — same date fields as rss.py
+# feedparser entries share rss.py's shape, so reuse its helpers rather than
+# re-implementing feed fetch/parse, id-hashing, and content extraction.
+from .rss import _parse_date, _parse_feed, _hash_external_id, _entry_body_html
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,14 @@ class WhiteHouseCollector(BaseCollector):
             or soup.select_one("main")
         )
         if body is None:
+            # None of the known containers matched — most likely another
+            # whitehouse.gov redesign (the same class of breakage that forced
+            # the RSS rewrite). Warn loudly so it surfaces instead of silently
+            # degrading every excerpt-only item to title-only.
+            logger.warning(
+                "[whitehouse] no known article body container in %s — "
+                "site markup may have changed; extracting title only", url,
+            )
             return ""
         for noise in body.select("nav, footer, aside, script, style"):
             noise.decompose()
@@ -83,57 +92,55 @@ class WhiteHouseCollector(BaseCollector):
 
         for path in FEED_PATHS:
             feed_url = urljoin(config.WHITEHOUSE_BASE_URL, path)
-            try:
-                # Fetch via requests (with a timeout) rather than letting
-                # feedparser.parse(url) do an untimed urllib fetch that can hang
-                # the whole run on a stalled feed.
-                resp = self.session.get(feed_url, timeout=config.REQUEST_TIMEOUT)
-                resp.raise_for_status()
-                feed = feedparser.parse(resp.content)
-            except Exception as exc:
-                logger.warning("[whitehouse] failed to fetch/parse feed %s: %s", feed_url, exc)
-                continue
-
-            if feed.get("bozo") and not feed.entries:
-                logger.warning(
-                    "[whitehouse] malformed/empty feed (status=%s): %s",
-                    feed.get("status"), feed_url,
-                )
+            feed = _parse_feed(self.session, feed_url, "whitehouse")
+            if feed is None:
                 continue
 
             for entry in feed.entries[: config.WHITEHOUSE_LIMIT]:
-                link = getattr(entry, "link", None)
-                if not link or link in seen_urls:
-                    continue
-                seen_urls.add(link)
+                # Isolate each entry: one malformed post (or a failed article
+                # fetch that raises) must not discard the rest of the run.
+                try:
+                    link = getattr(entry, "link", None)
+                    if not link or link in seen_urls:
+                        continue
+                    seen_urls.add(link)
 
-                title = getattr(entry, "title", "").strip()
+                    external_id = _hash_external_id(link)
+                    # Already stored — skip before the (expensive) article-page
+                    # fallback so we don't re-fetch/re-parse it every run. The
+                    # feeds overlap and mostly carry seen items, so this saves
+                    # the bulk of the per-run HTTP work on the Pi.
+                    if item_exists(self.source_name, external_id):
+                        continue
 
-                content_blocks = getattr(entry, "content", None) or []
-                body_html = content_blocks[0].get("value", "") if content_blocks else ""
-                body_text = self._html_to_text(body_html) if body_html else ""
-                if len(body_text) < _MIN_FULL_TEXT:
-                    body_text = self._fetch_article_text(link) or body_text
-                if not body_text and not title:
-                    continue
+                    title = getattr(entry, "title", "").strip()
 
-                content = f"{title}\n\n{body_text}".strip() if title else body_text
+                    body_html = _entry_body_html(entry)
+                    body_text = self._html_to_text(body_html) if body_html else ""
+                    if len(body_text) < _MIN_FULL_TEXT:
+                        body_text = self._fetch_article_text(link) or body_text
+                    if not body_text and not title:
+                        continue
 
-                items.append(
-                    CollectedItem(
-                        # Same scheme as before: URL hash (URLs are long)
-                        external_id=hashlib.sha256(link.encode()).hexdigest()[:24],
-                        content=content,
-                        url=link,
-                        author="White House",
-                        published_at=_parse_date(entry),
-                        raw_json={
-                            "feed_url": feed_url,
-                            "title": title,
-                            "entry_id": getattr(entry, "id", None),
-                        },
+                    content = f"{title}\n\n{body_text}".strip() if title else body_text
+
+                    items.append(
+                        CollectedItem(
+                            external_id=external_id,
+                            content=content,
+                            url=link,
+                            author="White House",
+                            published_at=_parse_date(entry),
+                            raw_json={
+                                "feed_url": feed_url,
+                                "title": title,
+                                "entry_id": getattr(entry, "id", None),
+                            },
+                        )
                     )
-                )
+                except Exception as exc:
+                    logger.warning("[whitehouse] skipping malformed entry: %s", exc)
+                    continue
 
         logger.debug("[whitehouse] collected %d items", len(items))
         return items

@@ -73,13 +73,23 @@ class TwitterCollector(BaseCollector):
 
         api = TwAPI()  # uses default accounts pool db
 
-        # Accounts are registered + logged in once by scripts/setup_twitter.sh
-        # and persist in accounts.db; only seed from env if the pool is empty.
-        # (Re-adding an existing account every run just logs a noisy
-        # "Account X already exists" warning and does nothing useful.)
-        if not await api.pool.accounts_info():
-            for acc in json.loads(config.TWITTER_ACCOUNTS_JSON):
+        # Accounts persist in accounts.db (registered + logged in by
+        # scripts/setup_twitter.sh). Seed any env account that isn't already in
+        # the pool — this picks up a newly-added/rotated account in
+        # TWITTER_ACCOUNTS_JSON without forcing a manual accounts.db delete,
+        # while skipping already-present ones (re-adding just warns and no-ops).
+        existing = {a["username"] for a in await api.pool.accounts_info()}
+        for acc in json.loads(config.TWITTER_ACCOUNTS_JSON):
+            if acc["username"] not in existing:
                 await api.pool.add_account(**acc)
+                # New accounts still need a login pass to get session tokens;
+                # setup_twitter.sh does that. Flag it so a silently-unusable
+                # account is obvious rather than looking merely idle.
+                logger.info(
+                    "[twitter] added account @%s from env — run "
+                    "scripts/setup_twitter.sh to log it in if not already done",
+                    acc["username"],
+                )
 
         # Resolve user ID once
         user = await api.user_by_login(config.TWITTER_TARGET_USER)
@@ -90,8 +100,21 @@ class TwitterCollector(BaseCollector):
         items: list[CollectedItem] = []
         skipped = 0
         async for tweet in api.user_tweets(user.id, limit=config.TWITTER_TWEET_LIMIT):
-            if not _has_analyzable_text(tweet.rawContent):
-                skipped += 1  # media-only / bare-link tweet — nothing to analyze
+            raw = tweet.rawContent or ""
+            # Expand t.co shortlinks to their destinations. A bare link to a
+            # company/asset site is itself an endorsement signal, so we keep
+            # such tweets and feed the detector the real URL instead of an
+            # opaque t.co (or dropping them). getattr keeps this safe if a
+            # twscrape version doesn't expose .links.
+            link_urls = [
+                l.url for l in (getattr(tweet, "links", None) or [])
+                if getattr(l, "url", None)
+            ]
+            content = "\n".join([raw, *link_urls]).strip()
+
+            # Skip only genuine media-only posts: no text AND no outbound link.
+            if not _has_analyzable_text(raw) and not link_urls:
+                skipped += 1
                 continue
 
             published_at: Optional[datetime] = None
@@ -101,7 +124,7 @@ class TwitterCollector(BaseCollector):
             items.append(
                 CollectedItem(
                     external_id=str(tweet.id),
-                    content=tweet.rawContent,
+                    content=content,
                     url=f"https://x.com/{config.TWITTER_TARGET_USER}/status/{tweet.id}",
                     author=config.TWITTER_TARGET_USER,
                     published_at=published_at,

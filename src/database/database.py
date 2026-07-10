@@ -132,6 +132,23 @@ def get_source_id(source_name: str) -> int:
         return row["id"]
 
 
+def item_exists(source_name: str, external_id: str) -> bool:
+    """True if an item with this (source, external_id) is already stored.
+
+    Cheap indexed lookup on the UNIQUE(source_id, external_id) constraint —
+    lets a collector skip expensive work (e.g. fetching an article page) for
+    items it has already seen, instead of relying on upsert_item to dedup after
+    the work is done.
+    """
+    source_id = get_source_id(source_name)
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM items WHERE source_id = %s AND external_id = %s",
+            (source_id, external_id),
+        )
+        return cur.fetchone() is not None
+
+
 def upsert_item(
     source_name: str,
     external_id: str,

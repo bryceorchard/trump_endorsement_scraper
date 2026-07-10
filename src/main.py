@@ -95,7 +95,7 @@ def run_detection():
         logger.info("[detection] %d/%d id=%s (%s) %r",
                     idx, total, item["id"], item["source_name"], preview)
         try:
-            result = detect_endorsement(item["content"], timeout=config.OLLAMA_TIMEOUT)
+            result = detect_endorsement(item["content"])
             save_endorsement(item["id"], result)
             analyzed += 1
 
@@ -120,10 +120,17 @@ def run_detection():
             logger.error("[detection] %s — pausing detection.", exc)
             break
         except DetectionTimeout as exc:
-            # This one item is too slow (not a server outage) — mark it processed
-            # and move on, so it can't wedge the queue and starve newer items.
-            logger.warning("[detection] item %s timed out (%s) — skipping.", item["id"], exc)
-            save_endorsement(item["id"], _make_error_result(item["content"]))
+            # A single call timed out. This is usually transient — a cold model
+            # load (~a minute on the Pi after an idle gap) or momentary overload,
+            # not a poison item. So DON'T mark it processed: leave it for a later
+            # cycle to retry once the model is warm, and just `continue` to the
+            # next item so one slow call can't wedge the batch. (A genuinely
+            # always-timing-out item costs one retry per cycle but is never
+            # silently written off as "no endorsement".)
+            logger.warning(
+                "[detection] item %s timed out (%s) — leaving for retry.", item["id"], exc
+            )
+            continue
         except Exception as exc:
             logger.warning("[detection] error on item %s: %s", item["id"], exc)
             # Still mark processed so we don't retry a permanently broken item
@@ -190,6 +197,9 @@ def main():
     # ── Scheduled mode ───────────────────────────────────────────────────────
     scheduler = BlockingScheduler(timezone="UTC")
     now = datetime.now(timezone.utc)   # every job also fires immediately on startup
+    # misfire_grace_time=None disables the default 1s grace window: if a slow Pi
+    # boot delays the scheduler past `now`, the immediate startup fire still runs
+    # instead of being dropped as a "missed" run.
 
     # One interval job per collector. Pass the name via args + name= (rather than
     # a lambda) so the logs read "truth_social"/"twitter"/… instead of four
@@ -208,6 +218,7 @@ def main():
             id=name,
             name=name,
             next_run_time=now,
+            misfire_grace_time=None,
         )
 
     scheduler.add_job(
@@ -216,6 +227,7 @@ def main():
         id="detection",
         name="detection",
         next_run_time=now,
+        misfire_grace_time=None,
     )
 
     logger.info(

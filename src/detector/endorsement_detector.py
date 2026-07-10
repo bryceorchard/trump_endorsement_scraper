@@ -90,6 +90,9 @@ def detect_endorsement(text: str, timeout: int | None = None) -> EndorsementResu
         ValueError: the model responded but with unparseable output; safe to
             treat as a per-item failure.
     """
+    if timeout is None:
+        timeout = config.OLLAMA_TIMEOUT
+
     payload = {
         "model": MODEL,
         "system": SYSTEM_PROMPT,
@@ -107,9 +110,7 @@ def detect_endorsement(text: str, timeout: int | None = None) -> EndorsementResu
     }
 
     try:
-        response = requests.post(
-            OLLAMA_URL, json=payload, timeout=timeout or config.OLLAMA_TIMEOUT
-        )
+        response = requests.post(OLLAMA_URL, json=payload, timeout=timeout)
         response.raise_for_status()
     except requests.exceptions.ConnectionError as exc:
         raise RuntimeError("Ollama is not running. Start it with: ollama serve") from exc
@@ -117,9 +118,7 @@ def detect_endorsement(text: str, timeout: int | None = None) -> EndorsementResu
         # A single call timing out usually means THIS item is too long, not that
         # Ollama is down — raise a distinct type so the caller skips the item
         # rather than pausing the loop (which would wedge forever on a poison item).
-        raise DetectionTimeout(
-            f"Ollama timed out after {timeout or config.OLLAMA_TIMEOUT}s"
-        ) from exc
+        raise DetectionTimeout(f"Ollama timed out after {timeout}s") from exc
     except requests.exceptions.RequestException as exc:
         # HTTP 404 (model not pulled), 5xx, other transport errors → pause.
         raise RuntimeError(f"Ollama request failed: {exc}") from exc

@@ -96,10 +96,14 @@ class TruthSocialCollector(BaseCollector):
             raise
 
         # A 200 carrying a Cloudflare challenge or an error object isn't the
-        # expected list of statuses — bail cleanly rather than iterating dict keys.
+        # expected list of statuses. Raise (rather than returning []) so the run
+        # is recorded as failed in collection_runs — otherwise a persistent
+        # challenge looks like a healthy run that just found nothing, hiding the
+        # outage.
         if not isinstance(statuses, list):
-            logger.warning("[truth_social] unexpected API response (not a list) — skipping run")
-            return []
+            raise RuntimeError(
+                f"unexpected Truth Social API response (not a list): {type(statuses).__name__}"
+            )
 
         for status in statuses:
             # Isolate each status: one malformed post must not discard the rest.
