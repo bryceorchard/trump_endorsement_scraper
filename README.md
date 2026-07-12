@@ -33,7 +33,7 @@ the other:
 | Collector | Source | Notes |
 | --- | --- | --- |
 | `truth_social` | Truth Social (Mastodon-compatible public API) | No auth. Fetched with `curl_cffi` Chrome TLS impersonation because Cloudflare 403s plain `requests`. |
-| `twitter` | Twitter/X via [`twscrape`](https://github.com/vladkens/twscrape) | Needs at least one registered account. Degrades to a no-op if `twscrape` isn't installed. Falls back to cookie auth when X blocks password login. |
+| `twitter` | Twitter/X via [`twscrape`](https://github.com/vladkens/twscrape) | Needs at least one registered account. X's anti-automation frequently blocks password login, so in practice you'll often need to supply that account's browser **cookies** (`auth_token` + `ct0`) for it to work — see [docs/SETUP.md](docs/SETUP.md) Step 5. Degrades to a no-op if `twscrape` isn't installed. |
 | `whitehouse` | whitehouse.gov per-section WordPress RSS (`/news/`, `/remarks/`, `/briefings-statements/`, `/presidential-actions/`) | Full text from `content:encoded`, with an article-page fallback. |
 | `rss` | Arbitrary news RSS feeds (`feedparser`) | Filtered to entries containing a Trump-relevance keyword. |
 
@@ -76,6 +76,7 @@ python3 -m venv .venv && .venv/bin/pip install -r scripts/requirements.txt
 # 2. Configure
 cp src/.env.example src/.env
 # edit src/.env — at minimum set DATABASE_URL; add TWITTER_ACCOUNTS_JSON to enable Twitter
+#   (Twitter often needs browser cookies, not just a password — see docs/SETUP.md Step 5)
 
 # 3. Run (from inside src/, which is the import root)
 cd src

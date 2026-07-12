@@ -128,13 +128,20 @@ This is a one-time step. twscrape caches session tokens in `src/accounts.db` and
 script (and the collector) force twscrape's `curl_cffi` backend via `TWS_HTTP_BACKEND=curl`, because
 X's Cloudflare 403s twscrape's default `httpx` client by TLS fingerprint.
 
-> **If login fails with X's `Could not log you in now` (code 399)** — that's X's own
-> anti-automation, past the Cloudflare layer, not a config error. Either wait and re-run (it's often
-> a temporary throttle), or use **browser cookies**, which is the reliable path: log in to `x.com`
-> in a browser, copy the `auth_token` and `ct0` cookies, and add a `"cookies"` field to the account
-> object in `TWITTER_ACCOUNTS_JSON` (see `src/.env.example`). twscrape won't update an account that
-> already exists, so delete `src/accounts.db` before re-running. The X/Twitter collector is
-> optional — the other three collectors run without it.
+> **Expect to need browser cookies, not just a username/password.** X's anti-automation
+> frequently blocks programmatic password login (you'll see `Could not log you in now`, code 399,
+> *past* the Cloudflare layer — it's X throttling, not a config error). Supplying the account's
+> browser cookies is the reliable path and is often required for the collector to work at all:
+>
+> 1. Log in to `x.com` in a normal browser.
+> 2. Copy that account's `auth_token` and `ct0` cookies (DevTools → Application/Storage → Cookies).
+> 3. Add a `"cookies"` field to the account object in `TWITTER_ACCOUNTS_JSON`, e.g.
+>    `"cookies": "auth_token=XXXX; ct0=YYYY"` (see `src/.env.example` for the full shape).
+> 4. twscrape won't update an account that already exists, so delete `src/accounts.db` before
+>    re-running `scripts/setup_twitter.sh`.
+>
+> If password login *does* work for you, the cookies are optional — but budget for needing them.
+> Either way the X/Twitter collector is optional; the other three collectors run without it.
 
 ---
 
