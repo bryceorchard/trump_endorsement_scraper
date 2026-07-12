@@ -8,14 +8,15 @@ Tables:
   endorsements     — LLM detection results, one row per analyzed item
 """
 
-import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost/trump_tracker")
+from config import config
+
+DATABASE_URL = config.DATABASE_URL
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -51,6 +52,9 @@ CREATE TABLE IF NOT EXISTS collection_runs (
 
 -- Track which items have been run through the endorsement detector
 ALTER TABLE items ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
+-- Count detector timeouts per item so a poison item can be given up on after a
+-- bounded number of retries instead of being retried forever.
+ALTER TABLE items ADD COLUMN IF NOT EXISTS detection_attempts INTEGER NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_items_published  ON items (published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_items_source     ON items (source_id);
@@ -116,13 +120,36 @@ def init_db():
     print("Database initialised.")
 
 
+_source_id_cache: dict[str, int] = {}
+
+
 def get_source_id(source_name: str) -> int:
+    if source_name in _source_id_cache:
+        return _source_id_cache[source_name]
     with db_cursor() as cur:
         cur.execute("SELECT id FROM sources WHERE name = %s", (source_name,))
         row = cur.fetchone()
         if row is None:
             raise ValueError(f"Unknown source: {source_name}")
+        _source_id_cache[source_name] = row["id"]
         return row["id"]
+
+
+def item_exists(source_name: str, external_id: str) -> bool:
+    """True if an item with this (source, external_id) is already stored.
+
+    Cheap indexed lookup on the UNIQUE(source_id, external_id) constraint —
+    lets a collector skip expensive work (e.g. fetching an article page) for
+    items it has already seen, instead of relying on upsert_item to dedup after
+    the work is done.
+    """
+    source_id = get_source_id(source_name)
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM items WHERE source_id = %s AND external_id = %s",
+            (source_id, external_id),
+        )
+        return cur.fetchone() is not None
 
 
 def upsert_item(
@@ -141,7 +168,9 @@ def upsert_item(
     import json
 
     source_id = get_source_id(source_name)
-    raw = json.dumps(raw_json) if raw_json is not None else None
+    # default=str keeps a stray datetime/Decimal in a payload from failing the
+    # whole upsert — raw_json is archival, lossy stringification is fine.
+    raw = json.dumps(raw_json, default=str) if raw_json is not None else None
 
     with db_cursor() as cur:
         cur.execute(
@@ -199,6 +228,20 @@ def get_unprocessed_items(batch_size: int = 50) -> list[dict]:
             (batch_size,),
         )
         return [dict(row) for row in cur.fetchall()]
+
+
+def record_detection_attempt(item_id: int) -> int:
+    """Increment the item's detector-timeout counter and return the new count.
+
+    Used to bound retries of items that keep timing out (see run_detection).
+    """
+    with db_cursor() as cur:
+        cur.execute(
+            "UPDATE items SET detection_attempts = detection_attempts + 1 "
+            "WHERE id = %s RETURNING detection_attempts",
+            (item_id,),
+        )
+        return cur.fetchone()["detection_attempts"]
 
 
 def save_endorsement(item_id: int, result) -> None:

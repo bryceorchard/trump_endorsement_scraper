@@ -1,34 +1,46 @@
 """
-whitehouse.py — Collector for White House speeches, remarks, and press briefings.
+whitehouse.py — Collector for White House remarks, briefings/statements, and
+presidential actions.
 
-Scrapes the three main briefing-room sections:
-  /briefing-room/speeches-remarks/
-  /briefing-room/press-briefings/
-  /briefing-room/statements-releases/
+whitehouse.gov is WordPress and publishes a standard RSS feed per section.
+The old /briefing-room/* listing pages this collector originally scraped were
+removed in the 2025 site redesign, and the replacement listing pages render
+their lists with JavaScript — so the section feeds are the reliable way in.
 
-For each listing page it finds article links, then fetches the full text of
-each article and stores it as a single item (deduplicated by URL).
+Feed items usually carry the full post text in <content:encoded>; when an
+entry doesn't, we fetch the article page and extract `div.entry-content`
+(selector verified against the live site, 2026-07).
 """
 
-import hashlib
 import logging
-from datetime import datetime, timezone
-from typing import Optional
 from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
 from config import config
+from database.database import item_exists
 from .base import BaseCollector, CollectedItem
+# feedparser entries share rss.py's shape, so reuse its helpers rather than
+# re-implementing feed fetch/parse, id-hashing, and content extraction.
+from .rss import _parse_date, _parse_feed, _hash_external_id, _entry_body_html
 
 logger = logging.getLogger(__name__)
 
-SECTIONS = [
-    "/briefing-room/speeches-remarks/",
-    "/briefing-room/press-briefings/",
-    "/briefing-room/statements-releases/",
+# /news/feed/ aggregates most sections (releases, fact-sheets,
+# briefings-statements, presidential-actions); the explicit section feeds add
+# depth (30 items each) and /remarks/ coverage. Overlap is fine — items dedup
+# by URL hash within the source.
+FEED_PATHS = [
+    "/news/feed/",
+    "/remarks/feed/",
+    "/briefings-statements/feed/",
+    "/presidential-actions/feed/",
 ]
+
+# Entries whose <content:encoded> is shorter than this are assumed to be
+# excerpts, so the full article page gets fetched instead.
+_MIN_FULL_TEXT = 200
 
 
 class WhiteHouseCollector(BaseCollector):
@@ -41,117 +53,94 @@ class WhiteHouseCollector(BaseCollector):
             "Accept": "text/html,application/xhtml+xml",
         })
 
-    def _get_soup(self, url: str) -> BeautifulSoup:
-        resp = self.session.get(url, timeout=config.REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        return BeautifulSoup(resp.text, "html.parser")
+    @staticmethod
+    def _html_to_text(html: str) -> str:
+        return BeautifulSoup(html, "html.parser").get_text(separator="\n", strip=True)
 
-    def _article_links_from_section(self, section_path: str) -> list[str]:
-        """Return up to WHITEHOUSE_LIMIT article URLs from a section listing page."""
-        url = urljoin(config.WHITEHOUSE_BASE_URL, section_path)
-        soup = self._get_soup(url)
-
-        links: list[str] = []
-        # The WH site wraps articles in <article> tags with an <a> inside the header
-        for article in soup.select("article"):
-            a = article.select_one("h2 a, h3 a, .news-item__title a")
-            if a and a.get("href"):
-                href = a["href"]
-                full = urljoin(config.WHITEHOUSE_BASE_URL, href)
-                links.append(full)
-            if len(links) >= config.WHITEHOUSE_LIMIT:
-                break
-
-        # Fallback: scan all links containing the section path
-        if not links:
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if section_path.rstrip("/").split("/")[-1] in href and href != section_path:
-                    full = urljoin(config.WHITEHOUSE_BASE_URL, href)
-                    if full not in links:
-                        links.append(full)
-                if len(links) >= config.WHITEHOUSE_LIMIT:
-                    break
-
-        return links
-
-    def _parse_article(self, url: str) -> Optional[CollectedItem]:
-        """Fetch a single WH article page and extract title + body text."""
+    def _fetch_article_text(self, url: str) -> str:
+        """Fallback for excerpt-only feed entries: extract the article body."""
         try:
-            soup = self._get_soup(url)
+            resp = self.session.get(url, timeout=config.REQUEST_TIMEOUT)
+            resp.raise_for_status()
         except Exception as exc:
             logger.warning("[whitehouse] failed to fetch %s: %s", url, exc)
-            return None
+            return ""
 
-        # Title
-        title_tag = soup.select_one("h1.page-header__title, h1.news-header__title, h1")
-        title = title_tag.get_text(strip=True) if title_tag else ""
-
-        # Published date
-        published_at: Optional[datetime] = None
-        time_tag = soup.select_one("time[datetime]")
-        if time_tag:
-            try:
-                published_at = datetime.fromisoformat(
-                    time_tag["datetime"].replace("Z", "+00:00")
-                )
-            except ValueError:
-                pass
-
-        # Body — the main article content
-        body_tag = soup.select_one(
-            "div.body-content, div.page-content, article .entry-content, "
-            "div[class*='body'], section.briefing-room__body"
+        soup = BeautifulSoup(resp.text, "html.parser")
+        body = (
+            soup.select_one("div.entry-content")
+            or soup.select_one("article")
+            or soup.select_one("main")
         )
-        if body_tag is None:
-            body_tag = soup.select_one("article") or soup.select_one("main")
-
-        body_text = ""
-        if body_tag:
-            # Remove nav, footer, sidebar noise
-            for noise in body_tag.select("nav, footer, aside, script, style, .related-briefing"):
-                noise.decompose()
-            body_text = body_tag.get_text(separator="\n", strip=True)
-
-        if not body_text:
-            logger.debug("[whitehouse] no body text for %s", url)
-            return None
-
-        content = f"{title}\n\n{body_text}".strip() if title else body_text
-
-        # Use URL hash as stable external_id (URL itself can be long)
-        external_id = hashlib.sha256(url.encode()).hexdigest()[:24]
-
-        return CollectedItem(
-            external_id=external_id,
-            content=content,
-            url=url,
-            author="White House",
-            published_at=published_at,
-            raw_json={"title": title, "url": url},
-        )
+        if body is None:
+            # None of the known containers matched — most likely another
+            # whitehouse.gov redesign (the same class of breakage that forced
+            # the RSS rewrite). Warn loudly so it surfaces instead of silently
+            # degrading every excerpt-only item to title-only.
+            logger.warning(
+                "[whitehouse] no known article body container in %s — "
+                "site markup may have changed; extracting title only", url,
+            )
+            return ""
+        for noise in body.select("nav, footer, aside, script, style"):
+            noise.decompose()
+        return body.get_text(separator="\n", strip=True)
 
     def collect(self) -> list[CollectedItem]:
-        seen_urls: set[str] = set()
         items: list[CollectedItem] = []
+        seen_urls: set[str] = set()
 
-        for section in SECTIONS:
-            try:
-                links = self._article_links_from_section(section)
-            except Exception as exc:
-                logger.warning("[whitehouse] failed to list section %s: %s", section, exc)
+        for path in FEED_PATHS:
+            feed_url = urljoin(config.WHITEHOUSE_BASE_URL, path)
+            feed = _parse_feed(self.session, feed_url, "whitehouse")
+            if feed is None:
                 continue
 
-            logger.debug("[whitehouse] section %s → %d links", section, len(links))
+            for entry in feed.entries[: config.WHITEHOUSE_LIMIT]:
+                # Isolate each entry: one malformed post (or a failed article
+                # fetch that raises) must not discard the rest of the run.
+                try:
+                    link = getattr(entry, "link", None)
+                    if not link or link in seen_urls:
+                        continue
+                    seen_urls.add(link)
 
-            for url in links:
-                if url in seen_urls:
+                    external_id = _hash_external_id(link)
+                    # Already stored — skip before the (expensive) article-page
+                    # fallback so we don't re-fetch/re-parse it every run. The
+                    # feeds overlap and mostly carry seen items, so this saves
+                    # the bulk of the per-run HTTP work on the Pi.
+                    if item_exists(self.source_name, external_id):
+                        continue
+
+                    title = getattr(entry, "title", "").strip()
+
+                    body_html = _entry_body_html(entry)
+                    body_text = self._html_to_text(body_html) if body_html else ""
+                    if len(body_text) < _MIN_FULL_TEXT:
+                        body_text = self._fetch_article_text(link) or body_text
+                    if not body_text and not title:
+                        continue
+
+                    content = f"{title}\n\n{body_text}".strip() if title else body_text
+
+                    items.append(
+                        CollectedItem(
+                            external_id=external_id,
+                            content=content,
+                            url=link,
+                            author="White House",
+                            published_at=_parse_date(entry),
+                            raw_json={
+                                "feed_url": feed_url,
+                                "title": title,
+                                "entry_id": getattr(entry, "id", None),
+                            },
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("[whitehouse] skipping malformed entry: %s", exc)
                     continue
-                seen_urls.add(url)
 
-                item = self._parse_article(url)
-                if item:
-                    items.append(item)
-
-        logger.debug("[whitehouse] collected %d articles", len(items))
+        logger.debug("[whitehouse] collected %d items", len(items))
         return items

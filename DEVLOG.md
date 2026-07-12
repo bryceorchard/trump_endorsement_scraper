@@ -71,9 +71,14 @@ One-way file sync from the Mac to the headless Raspberry Pi 5: **Mac `sendonly` 
 - **Access the Pi:** `ssh brycepi5` (→ `192.168.2.10`); project at `/home/bryce/project`.
 - **Syncthing GUI:** `https://192.168.2.10:8384` (TLS; accept the self-signed cert once).
 - **Ignore rules — allowlist** (kept matching on both ends; `.stignore` doesn't sync between devices): ship only `/src`, `/scripts`, `/test`; ignore everything else via a trailing `**`. Junk (`.DS_Store`, `._*`, `__pycache__`, `*.pyc`) is ignored *first* with the `(?d)` prefix so it's cleaned even inside kept dirs. Future-proof — new dev files at the repo root are auto-excluded from the Pi.
+- **Pi-local runtime state is explicitly ignored** (before the allowlist, so it wins): `/src/.env`, `/src/.env.bak-*`, `/src/accounts.db(-journal)`. These live *inside* the synced `src/` tree but exist only on the Pi (real credentials, twscrape session tokens) — without these rules, creating a `src/.env` on the Mac would overwrite the Pi's live one on the next sync.
 - **Golden rule:** the Pi builds its **own** `.venv` natively (ARM64) — never sync a venv or `.git`.
 
 <details><summary>📋 Changelog</summary>
+
+- **2026-07-09**
+  - Added ignore rules on both machines for Pi-local runtime state inside the synced tree (`/src/.env`, `/src/.env.bak-*`, `/src/accounts.db*`) — closes the hazard where a Mac-side `src/.env` would clobber the Pi's credentials on sync.
+  - Fixed the Pi's `src/.env` in place (backup kept): its JSON values (`RSS_FILTER_KEYWORDS`, `TWITTER_ACCOUNTS_JSON`) predated the single-quoting convention from PR #4, so `_env.sh`'s `set -a; . .env` stripped the inner double quotes and every helper script crashed with `json.decoder.JSONDecodeError`.
 
 - **2026-07-06**
   - Switched `.stignore` from a denylist to an **allowlist** — ship only `src/`, `scripts/`, `test/`; removed the now-excluded dev files (`.claude/`, `docs/`, `previous_conversations/`, top-level `*.md`, `.gitignore`, `.markdownlint.json`) from the Pi. Verified `13 == 13`, `pullErrors: 0`.

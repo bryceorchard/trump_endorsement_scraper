@@ -19,6 +19,27 @@ from config import config
 OLLAMA_URL = config.OLLAMA_URL
 MODEL      = config.OLLAMA_MODEL
 
+# Placeholder strings the model may emit instead of JSON null (the prompt below
+# literally says "or null"), normalized to None so they don't count as a real
+# company/ticker or pollute the DB.
+_NULLISH = {"", "null", "none", "n/a", "n.a.", "unknown"}
+
+
+class DetectionTimeout(Exception):
+    """The Ollama call for a single item timed out.
+
+    Distinct from RuntimeError (which pauses detection): the caller treats this
+    as an item-level failure and moves on, so one over-long item can't wedge the
+    whole queue. A genuinely-down Ollama surfaces as ConnectionError instead.
+    """
+
+
+def _nullish_to_none(value):
+    if isinstance(value, str) and value.strip().lower() in _NULLISH:
+        return None
+    return value
+
+
 SYSTEM_PROMPT = """You are an AI that analyzes statements made by Donald Trump and detects whether he is endorsing or promoting a specific company, brand, or financial asset (stocks, crypto, etc.).
 
 Respond ONLY with valid JSON in this exact format:
@@ -49,17 +70,29 @@ class EndorsementResult:
     raw_text: str
 
 
-def detect_endorsement(text: str, timeout: int = config.OLLAMA_TIMEOUT) -> EndorsementResult:
+def detect_endorsement(text: str, timeout: int | None = None) -> EndorsementResult:
     """
     Analyze text for Trump company endorsements.
 
     Args:
         text: The text to analyze (tweet, post, transcript excerpt, etc.)
-        timeout: Request timeout in seconds (inference can be slow on RPi5)
+        timeout: Request timeout in seconds (defaults to config.OLLAMA_TIMEOUT;
+                 inference is slow on an RPi5, and the first call after idle
+                 also pays the model-load time)
 
     Returns:
         EndorsementResult dataclass
+
+    Raises:
+        RuntimeError: Ollama is unreachable or the request failed (down, timed
+            out, model not pulled, 5xx). The caller should pause detection and
+            leave items unprocessed — these failures are not the item's fault.
+        ValueError: the model responded but with unparseable output; safe to
+            treat as a per-item failure.
     """
+    if timeout is None:
+        timeout = config.OLLAMA_TIMEOUT
+
     payload = {
         "model": MODEL,
         "system": SYSTEM_PROMPT,
@@ -71,11 +104,27 @@ def detect_endorsement(text: str, timeout: int = config.OLLAMA_TIMEOUT) -> Endor
         },
         # Disable Qwen3's thinking mode for faster responses on simple extraction
         "think": False,
+        # Keep the model resident between detection cycles — reloading 5 GB on
+        # a Pi takes ~a minute, and Ollama's default is to unload after 5 min.
+        "keep_alive": "30m",
     }
 
     try:
         response = requests.post(OLLAMA_URL, json=payload, timeout=timeout)
         response.raise_for_status()
+    except requests.exceptions.ConnectionError as exc:
+        raise RuntimeError("Ollama is not running. Start it with: ollama serve") from exc
+    except requests.exceptions.Timeout as exc:
+        # A single call timing out usually means THIS item is too long, not that
+        # Ollama is down — raise a distinct type so the caller skips the item
+        # rather than pausing the loop (which would wedge forever on a poison item).
+        raise DetectionTimeout(f"Ollama timed out after {timeout}s") from exc
+    except requests.exceptions.RequestException as exc:
+        # HTTP 404 (model not pulled), 5xx, other transport errors → pause.
+        raise RuntimeError(f"Ollama request failed: {exc}") from exc
+
+    raw_response = ""
+    try:
         raw_response = response.json()["response"].strip()
 
         # Strip markdown code fences if model wraps output in them
@@ -85,29 +134,34 @@ def detect_endorsement(text: str, timeout: int = config.OLLAMA_TIMEOUT) -> Endor
                 raw_response = raw_response[4:]
 
         data = json.loads(raw_response)
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        raise ValueError(f"Model returned invalid JSON: {raw_response[:500]!r}") from e
 
-        return EndorsementResult(
-            endorsement_detected=data.get("endorsement_detected", False),
-            company=data.get("company"),
-            ticker=data.get("ticker"),
-            confidence=data.get("confidence", "low"),
-            quote=data.get("quote"),
-            endorsement_type=data.get("endorsement_type", "none"),
-            raw_text=text,
-        )
-
-    except requests.exceptions.ConnectionError:
-        raise RuntimeError("Ollama is not running. Start it with: ollama serve")
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Model returned invalid JSON: {raw_response}") from e
+    return EndorsementResult(
+        endorsement_detected=data.get("endorsement_detected", False),
+        company=_nullish_to_none(data.get("company")),
+        ticker=_nullish_to_none(data.get("ticker")),
+        confidence=data.get("confidence", "low"),
+        quote=_nullish_to_none(data.get("quote")),
+        endorsement_type=data.get("endorsement_type", "none"),
+        raw_text=text,
+    )
 
 
 def is_actionable(result: EndorsementResult) -> bool:
-    """Returns True if the result warrants sending an alert."""
+    """Returns True if the result warrants sending an alert.
+
+    Requires a concrete company or ticker: an "endorsement" naming neither has
+    nothing to act on. This is what filters out the model's spurious hits on
+    general economic commentary ("Record Stock Market...") and political
+    endorsements of *people* ("he has my Complete and Total Endorsement") — both
+    of which it otherwise flags as detected with company=None, ticker=None.
+    """
     return (
         result.endorsement_detected
         and result.confidence in ("high", "medium")
         and result.endorsement_type != "none"
+        and bool(result.company or result.ticker)
     )
 
 

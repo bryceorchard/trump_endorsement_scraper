@@ -17,14 +17,19 @@ Run detection only (useful for testing Ollama separately):
 import argparse
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from config import config
-from database.database import init_db, get_unprocessed_items, save_endorsement
-from detector.endorsement_detector import detect_endorsement, is_actionable
+from database.database import (
+    init_db,
+    get_unprocessed_items,
+    save_endorsement,
+    record_detection_attempt,
+)
+from detector.endorsement_detector import detect_endorsement, is_actionable, DetectionTimeout
 from collectors import (
     TruthSocialCollector,
     TwitterCollector,
@@ -38,6 +43,10 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("trump_tracker")
+
+# APScheduler logs every job add + every run at INFO, which buries the app's own
+# output. Keep only its warnings (missed runs, overlapping jobs skipped).
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 COLLECTORS = {
     "truth_social": TruthSocialCollector,
@@ -79,13 +88,19 @@ def run_detection():
         logger.debug("[detection] no unprocessed items.")
         return
 
-    logger.info("[detection] processing %d item(s)...", len(items))
+    total = len(items)
+    logger.info("[detection] processing %d item(s)...", total)
     analyzed = 0
     hits = 0
 
-    for item in items:
+    for idx, item in enumerate(items, 1):
+        # Per-item heartbeat: each inference takes ~30s on a Pi and only
+        # actionable hits log below, so without this the loop looks hung.
+        preview = " ".join(item["content"].split())[:70]
+        logger.info("[detection] %d/%d id=%s (%s) %r",
+                    idx, total, item["id"], item["source_name"], preview)
         try:
-            result = detect_endorsement(item["content"], timeout=config.OLLAMA_TIMEOUT)
+            result = detect_endorsement(item["content"])
             save_endorsement(item["id"], result)
             analyzed += 1
 
@@ -105,9 +120,32 @@ def run_detection():
                     logger.warning('   Quote: "%s"', result.quote)
 
         except RuntimeError as exc:
-            # Ollama not running — stop the detection loop, don't mark item processed
+            # Ollama unreachable / misconfigured — stop the loop, leave items
+            # unprocessed so they're retried once the server is back.
             logger.error("[detection] %s — pausing detection.", exc)
             break
+        except DetectionTimeout as exc:
+            # A single call timed out. Usually transient — a cold model load
+            # (~a minute on the Pi after an idle gap) or momentary overload — so
+            # we retry rather than silently write the item off as "no
+            # endorsement". But bound the retries: a genuinely too-long "poison"
+            # item that always times out would otherwise sit unprocessed forever
+            # and, since the batch is oldest-first, fill every batch and starve
+            # newer items. After DETECTION_MAX_ATTEMPTS we give up and mark it
+            # processed so the queue keeps moving.
+            attempts = record_detection_attempt(item["id"])
+            if attempts >= config.DETECTION_MAX_ATTEMPTS:
+                logger.warning(
+                    "[detection] item %s timed out %d× (%s) — giving up, marking processed.",
+                    item["id"], attempts, exc,
+                )
+                save_endorsement(item["id"], _make_error_result(item["content"]))
+            else:
+                logger.warning(
+                    "[detection] item %s timed out (%s) — leaving for retry (%d/%d).",
+                    item["id"], exc, attempts, config.DETECTION_MAX_ATTEMPTS,
+                )
+            continue
         except Exception as exc:
             logger.warning("[detection] error on item %s: %s", item["id"], exc)
             # Still mark processed so we don't retry a permanently broken item
@@ -131,7 +169,7 @@ def _make_error_result(text: str):
 
 
 def run_all():
-    logger.info("=== Running all collectors at %s ===", datetime.utcnow().isoformat())
+    logger.info("=== Running all collectors at %s ===", datetime.now(timezone.utc).isoformat())
     for name in COLLECTORS:
         run_collector(name)
     run_detection()
@@ -173,36 +211,38 @@ def main():
 
     # ── Scheduled mode ───────────────────────────────────────────────────────
     scheduler = BlockingScheduler(timezone="UTC")
+    now = datetime.now(timezone.utc)   # every job also fires immediately on startup
+    # misfire_grace_time=None disables the default 1s grace window: if a slow Pi
+    # boot delays the scheduler past `now`, the immediate startup fire still runs
+    # instead of being dropped as a "missed" run.
 
-    scheduler.add_job(
-        lambda: run_collector("truth_social"),
-        IntervalTrigger(seconds=config.INTERVAL_TRUTH_SOCIAL),
-        id="truth_social",
-        next_run_time=datetime.utcnow(),   # run immediately on startup
-    )
-    scheduler.add_job(
-        lambda: run_collector("twitter"),
-        IntervalTrigger(seconds=config.INTERVAL_TWITTER),
-        id="twitter",
-        next_run_time=datetime.utcnow(),
-    )
-    scheduler.add_job(
-        lambda: run_collector("whitehouse"),
-        IntervalTrigger(seconds=config.INTERVAL_WHITEHOUSE),
-        id="whitehouse",
-        next_run_time=datetime.utcnow(),
-    )
-    scheduler.add_job(
-        lambda: run_collector("rss"),
-        IntervalTrigger(seconds=config.INTERVAL_RSS),
-        id="rss",
-        next_run_time=datetime.utcnow(),
-    )
+    # One interval job per collector. Pass the name via args + name= (rather than
+    # a lambda) so the logs read "truth_social"/"twitter"/… instead of four
+    # identical "main.<locals>.<lambda>" lines.
+    collector_intervals = {
+        "truth_social": config.INTERVAL_TRUTH_SOCIAL,
+        "twitter":      config.INTERVAL_TWITTER,
+        "whitehouse":   config.INTERVAL_WHITEHOUSE,
+        "rss":          config.INTERVAL_RSS,
+    }
+    for name, interval in collector_intervals.items():
+        scheduler.add_job(
+            run_collector,
+            IntervalTrigger(seconds=interval),
+            args=[name],
+            id=name,
+            name=name,
+            next_run_time=now,
+            misfire_grace_time=None,
+        )
+
     scheduler.add_job(
         run_detection,
         IntervalTrigger(seconds=config.INTERVAL_DETECTION),
         id="detection",
-        next_run_time=datetime.utcnow(),
+        name="detection",
+        next_run_time=now,
+        misfire_grace_time=None,
     )
 
     logger.info(

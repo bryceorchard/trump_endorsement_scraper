@@ -46,12 +46,48 @@ def _parse_date(entry) -> Optional[datetime]:
     return None
 
 
+def _hash_external_id(value: str) -> str:
+    """Stable dedup key for items with no native ID: truncated SHA-256 of the
+    given string (usually the item URL). Shared by the rss and whitehouse
+    collectors so their dedup keys can't drift apart."""
+    return hashlib.sha256(value.encode()).hexdigest()[:24]
+
+
+def _entry_body_html(entry) -> str:
+    """First <content:encoded> block's HTML from a feedparser entry, or ""."""
+    content_blocks = getattr(entry, "content", None) or []
+    return content_blocks[0].get("value", "") if content_blocks else ""
+
+
+def _parse_feed(session, feed_url: str, log_prefix: str):
+    """Fetch a feed via `session` (with a real timeout — feedparser.parse(url)
+    does an untimed urllib fetch that can hang the run) and parse it. Returns the
+    feedparser result, or None if the fetch failed or the feed is malformed-and-empty.
+    Shared by the rss and whitehouse collectors."""
+    try:
+        resp = session.get(feed_url, timeout=config.REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        feed = feedparser.parse(resp.content)
+    except Exception as exc:
+        logger.warning("[%s] failed to fetch/parse feed %s: %s", log_prefix, feed_url, exc)
+        return None
+
+    if feed.get("bozo") and not feed.entries:
+        logger.warning(
+            "[%s] malformed/empty feed (status=%s): %s",
+            log_prefix, feed.get("status"), feed_url,
+        )
+        return None
+
+    return feed
+
+
 def _is_relevant(entry) -> bool:
     """Return True if the entry contains at least one filter keyword (case-insensitive)."""
     text = " ".join([
         getattr(entry, "title", ""),
         getattr(entry, "summary", ""),
-        getattr(entry, "content", [{}])[0].get("value", "") if hasattr(entry, "content") else "",
+        _entry_body_html(entry),
     ]).lower()
     return any(kw.lower() in text for kw in config.RSS_FILTER_KEYWORDS)
 
@@ -60,23 +96,17 @@ class RSSCollector(BaseCollector):
     source_name = "rss"
 
     def __init__(self):
-        # feedparser uses its own HTTP stack but respects User-Agent via a kwarg
-        self._ua = config.USER_AGENT
+        # Fetch feeds ourselves so we control the timeout — feedparser.parse(url)
+        # does its own urllib fetch with NO timeout, so a stalled feed body hangs
+        # the whole collector thread forever (and the scheduler then coalesces it
+        # away, silently killing this source until restart).
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": config.USER_AGENT})
 
     def _fetch_feed(self, feed_url: str) -> list[CollectedItem]:
         """Parse a single RSS/Atom feed and return relevant items."""
-        try:
-            feed = feedparser.parse(
-                feed_url,
-                agent=self._ua,
-                request_headers={"User-Agent": self._ua},
-            )
-        except Exception as exc:
-            logger.warning("[rss] failed to parse feed %s: %s", feed_url, exc)
-            return []
-
-        if feed.get("bozo") and not feed.entries:
-            logger.warning("[rss] malformed feed (bozo): %s", feed_url)
+        feed = _parse_feed(self.session, feed_url, "rss")
+        if feed is None:
             return []
 
         feed_title = feed.feed.get("title", feed_url)
@@ -88,8 +118,7 @@ class RSSCollector(BaseCollector):
 
             title = getattr(entry, "title", "").strip()
             summary = getattr(entry, "summary", "").strip()
-            content_blocks = getattr(entry, "content", [])
-            body = content_blocks[0].get("value", "") if content_blocks else ""
+            body = _entry_body_html(entry)
 
             # Prefer full content over summary
             text = body or summary
@@ -101,10 +130,11 @@ class RSSCollector(BaseCollector):
             # Use entry link as canonical ID; fall back to a hash of title+date
             link = getattr(entry, "link", None)
             if link:
-                external_id = hashlib.sha256(link.encode()).hexdigest()[:24]
+                external_id = _hash_external_id(link)
             else:
-                raw_id = f"{feed_url}:{title}:{getattr(entry, 'published', '')}"
-                external_id = hashlib.sha256(raw_id.encode()).hexdigest()[:24]
+                external_id = _hash_external_id(
+                    f"{feed_url}:{title}:{getattr(entry, 'published', '')}"
+                )
 
             published_at = _parse_date(entry)
 
