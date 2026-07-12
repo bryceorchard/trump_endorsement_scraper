@@ -78,10 +78,26 @@ class TwitterCollector(BaseCollector):
         # the pool — this picks up a newly-added/rotated account in
         # TWITTER_ACCOUNTS_JSON without forcing a manual accounts.db delete,
         # while skipping already-present ones (re-adding just warns and no-ops).
-        existing = {a["username"] for a in await api.pool.accounts_info()}
-        for acc in json.loads(config.TWITTER_ACCOUNTS_JSON):
+        env_accounts = json.loads(config.TWITTER_ACCOUNTS_JSON)
+        pool_info = await api.pool.accounts_info()
+        if not pool_info and not env_accounts:
+            # Not configured at all — that's a valid setup (this collector is
+            # optional), so skip cleanly instead of failing the run with a
+            # twscrape traceback every cycle.
+            logger.warning(
+                "[twitter] skipping — no Twitter accounts configured. To enable this "
+                "collector, set TWITTER_ACCOUNTS_JSON in src/.env and run "
+                "scripts/setup_twitter.sh (docs/SETUP.md Step 5). The other "
+                "collectors are unaffected."
+            )
+            return []
+
+        existing = {a["username"] for a in pool_info}
+        added = False
+        for acc in env_accounts:
             if acc["username"] not in existing:
                 await api.pool.add_account(**acc)
+                added = True
                 # New accounts still need a login pass to get session tokens;
                 # setup_twitter.sh does that. Flag it so a silently-unusable
                 # account is obvious rather than looking merely idle.
@@ -90,6 +106,20 @@ class TwitterCollector(BaseCollector):
                     "scripts/setup_twitter.sh to log it in if not already done",
                     acc["username"],
                 )
+        if added:
+            pool_info = await api.pool.accounts_info()
+
+        if pool_info and not any(a.get("active") for a in pool_info):
+            # Registered but never (successfully) logged in — every request
+            # would fail with twscrape's "no account available". Say what's
+            # wrong and what fixes it, then skip this run.
+            logger.warning(
+                "[twitter] skipping — %d account(s) registered but none are logged "
+                "in. Run scripts/setup_twitter.sh; if password login is blocked by "
+                "X (code 399), use browser cookies (docs/SETUP.md Step 5).",
+                len(pool_info),
+            )
+            return []
 
         # Resolve user ID once
         user = await api.user_by_login(config.TWITTER_TARGET_USER)

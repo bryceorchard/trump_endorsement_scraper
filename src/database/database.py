@@ -213,7 +213,13 @@ def finish_run(run_id: int, items_found: int, items_new: int, error: Optional[st
 def get_unprocessed_items(batch_size: int = 50) -> list[dict]:
     """
     Return up to batch_size items that have not yet been run through the
-    endorsement detector (processed_at IS NULL), oldest first.
+    endorsement detector (processed_at IS NULL), **newest content first**.
+
+    Ordering by published_at DESC means a fresh post is always analyzed before
+    backlog (a first run backfills years of old tweets, and alerting on those
+    is worthless); once everything new is processed, later batches naturally
+    work backwards through the older items. Items with no published date sort
+    last, newest-fetched first.
     """
     with db_cursor() as cur:
         cur.execute(
@@ -222,12 +228,20 @@ def get_unprocessed_items(batch_size: int = 50) -> list[dict]:
             FROM items i
             JOIN sources s ON s.id = i.source_id
             WHERE i.processed_at IS NULL
-            ORDER BY i.fetched_at ASC
+            ORDER BY i.published_at DESC NULLS LAST, i.fetched_at DESC
             LIMIT %s
             """,
             (batch_size,),
         )
         return [dict(row) for row in cur.fetchall()]
+
+
+def count_unprocessed_items() -> int:
+    """Total items still awaiting detection — lets the caller tell the user
+    how much of the queue a single batch covers."""
+    with db_cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM items WHERE processed_at IS NULL")
+        return cur.fetchone()["n"]
 
 
 def record_detection_attempt(item_id: int) -> int:

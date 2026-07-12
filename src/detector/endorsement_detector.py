@@ -167,6 +167,8 @@ def is_actionable(result: EndorsementResult) -> bool:
 
 # ── Quick test ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    import sys
+
     test_cases = [
         "Just had a GREAT meeting with Tim Cook. Apple is doing TREMENDOUS things for America!",
         "The fake news media is at it again. Very sad!",
@@ -176,7 +178,16 @@ if __name__ == "__main__":
 
     for text in test_cases:
         print(f"\nInput: {text[:80]}...")
-        result = detect_endorsement(text)
+        try:
+            result = detect_endorsement(text)
+        except (RuntimeError, DetectionTimeout) as exc:
+            print(f"\nDetector unavailable: {exc}", file=sys.stderr)
+            print(
+                f"Start Ollama with `ollama serve` and make sure the model is "
+                f"pulled: `ollama pull {MODEL}` (see docs/SETUP.md Step 1).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print(f"  Detected:  {result.endorsement_detected}")
         print(f"  Company:   {result.company}")
         print(f"  Ticker:    {result.ticker}")

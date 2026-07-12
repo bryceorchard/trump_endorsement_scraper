@@ -95,9 +95,15 @@ Run from inside `src/`:
 python3 main.py --run-once                 # all collectors + detection, once
 python3 main.py --collector truth_social   # a single collector (truth_social|twitter|whitehouse|rss)
 python3 main.py --detect-only              # detection only, against what's already in the DB
+python3 main.py --detect-only --drain      # …and keep going until the whole queue is analyzed
 python3 main.py                            # scheduled mode (blocking); per-source intervals from config
 python3 -m detector.endorsement_detector   # quick manual detector test against sample text
 ```
+
+Detection works **newest content first**, one batch of `DETECTION_BATCH_SIZE` (default 10)
+per pass — the run tells you how much of the queue that covers. Add `--drain` to
+`--run-once`/`--detect-only` to process the entire backlog in one invocation (each item
+costs an LLM inference, ~30 s on a Pi, so a big backlog takes a while).
 
 The `scripts/` directory has convenience wrappers (`run_once.sh`, `start.sh`,
 `test_detector.sh`, …) that load `src/.env` for you.

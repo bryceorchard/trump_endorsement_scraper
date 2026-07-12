@@ -19,6 +19,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 
+import psycopg2
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -26,6 +27,7 @@ from config import config
 from database.database import (
     init_db,
     get_unprocessed_items,
+    count_unprocessed_items,
     save_endorsement,
     record_detection_attempt,
 )
@@ -74,24 +76,90 @@ def run_collector(name: str):
         logger.error("[%s] unhandled error: %s", name, exc, exc_info=True)
 
 
-def run_detection():
-    """
-    Pull unprocessed items from the DB, run each through the endorsement
-    detector, persist results, and log any actionable hits.
-    """
-    if not config.DETECTION_ENABLED:
-        logger.debug("Detection disabled (DETECTION_ENABLED=false), skipping.")
-        return
+# Log the "detection disabled" reminder loudly once, then quietly — a scheduled
+# service with detection off would otherwise warn every cycle or never at all.
+_warned_detection_disabled = False
 
+
+def run_detection(drain: bool = False) -> bool:
+    """
+    Pull unprocessed items from the DB (newest content first), run each through
+    the endorsement detector, persist results, and log any actionable hits.
+
+    One call processes a single batch of DETECTION_BATCH_SIZE items — the
+    scheduled job drains the queue gradually. With drain=True (the --drain
+    flag), keeps processing batches until the queue is empty.
+
+    Returns False if detection had to stop early (Ollama unreachable), True
+    otherwise — so one-shot CLI modes can exit non-zero instead of pretending
+    the run succeeded.
+    """
+    global _warned_detection_disabled
+    if not config.DETECTION_ENABLED:
+        if not _warned_detection_disabled:
+            _warned_detection_disabled = True
+            logger.warning(
+                "Detection is disabled (DETECTION_ENABLED=false) — collected items "
+                "are queuing up unprocessed. Set DETECTION_ENABLED=true in src/.env "
+                "once Ollama is available."
+            )
+        else:
+            logger.debug("Detection disabled (DETECTION_ENABLED=false), skipping.")
+        return True
+
+    ok = True
+    while True:
+        batch_done = _run_detection_batch()
+        if batch_done is None:          # queue empty
+            break
+        if not batch_done["ok"]:        # Ollama down — stop, don't spin
+            ok = False
+            break
+        if not drain:
+            break
+        if batch_done["progressed"] == 0:
+            # Every item in the batch was left for retry (timeouts) — looping
+            # again would just re-run the same batch. Stop and say so.
+            logger.warning(
+                "[detection] --drain stopping: no items completed this batch "
+                "(all left for timeout retry). Re-run later once Ollama is faster/warm."
+            )
+            break
+
+    remaining = count_unprocessed_items()
+    if remaining:
+        logger.info(
+            "[detection] %d unprocessed item(s) remain — they'll be picked up by the "
+            "next detection cycle (scheduled mode) or the next --detect-only/--run-once "
+            "(add --drain to process the whole queue in one go).",
+            remaining,
+        )
+    return ok
+
+
+def _run_detection_batch() -> dict | None:
+    """Process one batch. Returns None if the queue was empty, else
+    {"ok": bool (False = Ollama down), "progressed": int (items completed)}."""
     items = get_unprocessed_items(batch_size=config.DETECTION_BATCH_SIZE)
     if not items:
-        logger.debug("[detection] no unprocessed items.")
-        return
+        logger.info("[detection] queue empty — all collected items have been analyzed.")
+        return None
 
+    total_unprocessed = count_unprocessed_items()
     total = len(items)
-    logger.info("[detection] processing %d item(s)...", total)
+    if total_unprocessed > total:
+        logger.info(
+            "[detection] processing %d of %d unprocessed item(s) "
+            "(batch size DETECTION_BATCH_SIZE=%d, newest first)...",
+            total, total_unprocessed, config.DETECTION_BATCH_SIZE,
+        )
+    else:
+        logger.info("[detection] processing %d item(s) (newest first)...", total)
+
     analyzed = 0
     hits = 0
+    gave_up = 0
+    ok = True
 
     for idx, item in enumerate(items, 1):
         # Per-item heartbeat: each inference takes ~30s on a Pi and only
@@ -122,7 +190,14 @@ def run_detection():
         except RuntimeError as exc:
             # Ollama unreachable / misconfigured — stop the loop, leave items
             # unprocessed so they're retried once the server is back.
-            logger.error("[detection] %s — pausing detection.", exc)
+            logger.error(
+                "[detection] %s — stopping detection for now. Nothing is lost: "
+                "unanalyzed items stay queued and are retried automatically once "
+                "Ollama is reachable (start it with `ollama serve`; ensure the "
+                "model is pulled: `ollama pull %s` — see docs/SETUP.md Step 1).",
+                exc, config.OLLAMA_MODEL,
+            )
+            ok = False
             break
         except DetectionTimeout as exc:
             # A single call timed out. Usually transient — a cold model load
@@ -140,6 +215,7 @@ def run_detection():
                     item["id"], attempts, exc,
                 )
                 save_endorsement(item["id"], _make_error_result(item["content"]))
+                gave_up += 1
             else:
                 logger.warning(
                     "[detection] item %s timed out (%s) — leaving for retry (%d/%d).",
@@ -147,11 +223,16 @@ def run_detection():
                 )
             continue
         except Exception as exc:
-            logger.warning("[detection] error on item %s: %s", item["id"], exc)
-            # Still mark processed so we don't retry a permanently broken item
+            logger.warning(
+                "[detection] error on item %s: %s — marking it processed (no detection) "
+                "so it isn't retried forever.",
+                item["id"], exc,
+            )
             save_endorsement(item["id"], _make_error_result(item["content"]))
+            gave_up += 1
 
     logger.info("[detection] analyzed=%d  actionable_hits=%d", analyzed, hits)
+    return {"ok": ok, "progressed": analyzed + gave_up}
 
 
 def _make_error_result(text: str):
@@ -168,11 +249,17 @@ def _make_error_result(text: str):
     )
 
 
-def run_all():
+def run_all(drain: bool = False) -> bool:
     logger.info("=== Running all collectors at %s ===", datetime.now(timezone.utc).isoformat())
     for name in COLLECTORS:
         run_collector(name)
-    run_detection()
+    return run_detection(drain=drain)
+
+
+def _redact_db_url(url: str) -> str:
+    """Hide the password when echoing DATABASE_URL in error messages."""
+    import re
+    return re.sub(r"(://[^:/@]+):[^@]*@", r"\1:***@", url)
 
 
 def main():
@@ -192,21 +279,46 @@ def main():
         action="store_true",
         help="Run the endorsement detector on unprocessed items and exit",
     )
+    parser.add_argument(
+        "--drain",
+        action="store_true",
+        help="With --run-once/--detect-only: keep processing detection batches "
+             "until the queue is empty (default is one batch of "
+             f"DETECTION_BATCH_SIZE={config.DETECTION_BATCH_SIZE})",
+    )
     args = parser.parse_args()
 
+    if args.detect_only and not config.DETECTION_ENABLED:
+        logger.error(
+            "--detect-only requested, but DETECTION_ENABLED=false in src/.env — "
+            "nothing to do. Set DETECTION_ENABLED=true (and have Ollama running) first."
+        )
+        sys.exit(1)
+
     # Always initialise the DB first
-    init_db()
+    try:
+        init_db()
+    except psycopg2.OperationalError as exc:
+        logger.error(
+            "Cannot connect to PostgreSQL at %s:\n  %s\n"
+            "Is Postgres running? scripts/setup.sh creates the role and database "
+            "(see docs/SETUP.md Step 2); check DATABASE_URL in src/.env.",
+            _redact_db_url(config.DATABASE_URL), str(exc).strip(),
+        )
+        sys.exit(1)
 
     if args.collector:
         run_collector(args.collector)
         return
 
     if args.detect_only:
-        run_detection()
+        if not run_detection(drain=args.drain):
+            sys.exit(1)   # Ollama was unreachable — don't pretend this succeeded
         return
 
     if args.run_once:
-        run_all()
+        if not run_all(drain=args.drain):
+            sys.exit(1)   # collectors ran, but detection couldn't (Ollama down)
         return
 
     # ── Scheduled mode ───────────────────────────────────────────────────────
@@ -262,4 +374,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        # Progress is safe: processed items are stamped as they complete, and
+        # anything in flight simply stays queued for the next run.
+        logger.info("Interrupted — exiting. Progress so far is saved.")
+        sys.exit(130)
