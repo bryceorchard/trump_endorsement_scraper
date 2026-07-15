@@ -13,8 +13,11 @@ import os
 
 def _json_env(name: str, default: str):
     """Parse a JSON-valued env var, failing with the variable name and value
-    instead of an anonymous JSONDecodeError from deep inside json."""
-    raw = os.getenv(name, default)
+    instead of an anonymous JSONDecodeError from deep inside json.
+
+    A variable that is set but blank (e.g. `TWITTER_ACCOUNTS_JSON=` in .env to
+    disable a feature) falls back to the default rather than erroring."""
+    raw = os.getenv(name) or default
     try:
         return _json.loads(raw)
     except _json.JSONDecodeError as exc:
@@ -39,6 +42,9 @@ TRUTH_SOCIAL_LIMIT       = int(os.getenv("TRUTH_SOCIAL_LIMIT", "40"))
 # twscrape needs at least one Twitter account. Add credentials as JSON list:
 # '[{"username":"u","password":"p","email":"e","email_password":"ep"}]'
 TWITTER_ACCOUNTS_JSON = os.getenv("TWITTER_ACCOUNTS_JSON", "[]")
+# Parsed form (list of account dicts) with blank/invalid handled up front —
+# collectors should use this, not re-parse the raw string.
+TWITTER_ACCOUNTS: list = _json_env("TWITTER_ACCOUNTS_JSON", "[]")
 TWITTER_TARGET_USER   = os.getenv("TWITTER_TARGET_USER", "realDonaldTrump")
 TWITTER_TWEET_LIMIT   = int(os.getenv("TWITTER_TWEET_LIMIT", "40"))
 

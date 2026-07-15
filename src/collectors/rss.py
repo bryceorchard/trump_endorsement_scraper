@@ -18,6 +18,7 @@ import requests
 
 from config import config
 from .base import BaseCollector, CollectedItem
+from .truth_social import _strip_html  # shared HTML→text, same as sibling collectors
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +121,10 @@ class RSSCollector(BaseCollector):
             summary = getattr(entry, "summary", "").strip()
             body = _entry_body_html(entry)
 
-            # Prefer full content over summary
-            text = body or summary
+            # Prefer full content over summary; strip markup like the other
+            # collectors do — feed HTML ('<p><a href=…') otherwise reaches the
+            # detector and burns inference tokens on tags.
+            text = _strip_html(body or summary)
             if not text and not title:
                 continue
 

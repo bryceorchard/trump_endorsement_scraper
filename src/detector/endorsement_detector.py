@@ -84,9 +84,12 @@ def detect_endorsement(text: str, timeout: int | None = None) -> EndorsementResu
         EndorsementResult dataclass
 
     Raises:
-        RuntimeError: Ollama is unreachable or the request failed (down, timed
-            out, model not pulled, 5xx). The caller should pause detection and
-            leave items unprocessed — these failures are not the item's fault.
+        RuntimeError: Ollama is unreachable or the request failed (down, model
+            not pulled, 5xx). The caller should pause detection and leave items
+            unprocessed — these failures are not the item's fault.
+        DetectionTimeout: this one call exceeded the timeout. The caller
+            retries the item on a later run (bounded by DETECTION_MAX_ATTEMPTS)
+            rather than pausing the loop.
         ValueError: the model responded but with unparseable output; safe to
             treat as a per-item failure.
     """
@@ -113,7 +116,10 @@ def detect_endorsement(text: str, timeout: int | None = None) -> EndorsementResu
         response = requests.post(OLLAMA_URL, json=payload, timeout=timeout)
         response.raise_for_status()
     except requests.exceptions.ConnectionError as exc:
-        raise RuntimeError("Ollama is not running. Start it with: ollama serve") from exc
+        raise RuntimeError(
+            "Ollama is not running — start it with `ollama serve` "
+            "(see docs/SETUP.md Step 1)"
+        ) from exc
     except requests.exceptions.Timeout as exc:
         # A single call timing out usually means THIS item is too long, not that
         # Ollama is down — raise a distinct type so the caller skips the item
@@ -121,7 +127,10 @@ def detect_endorsement(text: str, timeout: int | None = None) -> EndorsementResu
         raise DetectionTimeout(f"Ollama timed out after {timeout}s") from exc
     except requests.exceptions.RequestException as exc:
         # HTTP 404 (model not pulled), 5xx, other transport errors → pause.
-        raise RuntimeError(f"Ollama request failed: {exc}") from exc
+        raise RuntimeError(
+            f"Ollama request failed: {exc} — if the model isn't pulled, run "
+            f"`ollama pull {MODEL}` (see docs/SETUP.md Step 1)"
+        ) from exc
 
     raw_response = ""
     try:
@@ -181,12 +190,8 @@ if __name__ == "__main__":
         try:
             result = detect_endorsement(text)
         except (RuntimeError, DetectionTimeout) as exc:
+            # The exception message already carries the remediation steps.
             print(f"\nDetector unavailable: {exc}", file=sys.stderr)
-            print(
-                f"Start Ollama with `ollama serve` and make sure the model is "
-                f"pulled: `ollama pull {MODEL}` (see docs/SETUP.md Step 1).",
-                file=sys.stderr,
-            )
             sys.exit(1)
         print(f"  Detected:  {result.endorsement_detected}")
         print(f"  Company:   {result.company}")

@@ -18,6 +18,11 @@ from config import config
 
 DATABASE_URL = config.DATABASE_URL
 
+# Re-exported so callers can catch DB-transport failures without importing
+# psycopg2 themselves (this module stays the only one that knows the driver).
+# Covers OperationalError (server down) and ProgrammingError (malformed DSN).
+DatabaseError = psycopg2.Error
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sources (
     id          SERIAL PRIMARY KEY,
@@ -59,7 +64,12 @@ ALTER TABLE items ADD COLUMN IF NOT EXISTS detection_attempts INTEGER NOT NULL D
 CREATE INDEX IF NOT EXISTS idx_items_published  ON items (published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_items_source     ON items (source_id);
 CREATE INDEX IF NOT EXISTS idx_items_fetched    ON items (fetched_at DESC);
-CREATE INDEX IF NOT EXISTS idx_items_unprocessed ON items (id) WHERE processed_at IS NULL;
+-- Serves both the newest-first detection batch (matches get_unprocessed_items'
+-- ORDER BY exactly) and COUNT of the unprocessed queue; replaces the older
+-- narrower idx_items_unprocessed.
+DROP INDEX IF EXISTS idx_items_unprocessed;
+CREATE INDEX IF NOT EXISTS idx_items_detection_queue
+    ON items ((COALESCE(published_at, fetched_at)) DESC) WHERE processed_at IS NULL;
 
 -- Endorsement detection results — one row per analyzed item
 CREATE TABLE IF NOT EXISTS endorsements (
@@ -210,16 +220,20 @@ def finish_run(run_id: int, items_found: int, items_new: int, error: Optional[st
 
 # ── Endorsement detection helpers ─────────────────────────────────────────────
 
-def get_unprocessed_items(batch_size: int = 50) -> list[dict]:
+def get_unprocessed_items(batch_size: int = 50, exclude_ids: list[int] = ()) -> list[dict]:
     """
     Return up to batch_size items that have not yet been run through the
     endorsement detector (processed_at IS NULL), **newest content first**.
 
-    Ordering by published_at DESC means a fresh post is always analyzed before
-    backlog (a first run backfills years of old tweets, and alerting on those
-    is worthless); once everything new is processed, later batches naturally
-    work backwards through the older items. Items with no published date sort
-    last, newest-fetched first.
+    Newest-first means a fresh post is always analyzed before backlog (a first
+    run backfills years of old tweets, and alerting on those is worthless);
+    once everything new is processed, later batches naturally work backwards
+    through the older items. Items with no published date count as fresh from
+    the moment they were fetched (COALESCE with fetched_at) rather than
+    sorting behind the entire dated backlog.
+
+    exclude_ids: item ids to leave out (e.g. items deferred for a timeout
+    retry within the current --drain run, so the batch moves on to others).
     """
     with db_cursor() as cur:
         cur.execute(
@@ -228,10 +242,11 @@ def get_unprocessed_items(batch_size: int = 50) -> list[dict]:
             FROM items i
             JOIN sources s ON s.id = i.source_id
             WHERE i.processed_at IS NULL
-            ORDER BY i.published_at DESC NULLS LAST, i.fetched_at DESC
+              AND NOT (i.id = ANY(%s))
+            ORDER BY COALESCE(i.published_at, i.fetched_at) DESC, i.id DESC
             LIMIT %s
             """,
-            (batch_size,),
+            (list(exclude_ids), batch_size),
         )
         return [dict(row) for row in cur.fetchall()]
 

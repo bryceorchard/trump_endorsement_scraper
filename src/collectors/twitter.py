@@ -78,9 +78,12 @@ class TwitterCollector(BaseCollector):
         # the pool — this picks up a newly-added/rotated account in
         # TWITTER_ACCOUNTS_JSON without forcing a manual accounts.db delete,
         # while skipping already-present ones (re-adding just warns and no-ops).
-        env_accounts = json.loads(config.TWITTER_ACCOUNTS_JSON)
-        pool_info = await api.pool.accounts_info()
-        if not pool_info and not env_accounts:
+        # config.TWITTER_ACCOUNTS is pre-parsed (blank/invalid env handled there);
+        # pool.get_all() returns typed Account objects (.username/.active) rather
+        # than the accounts_info() display dicts, so a shape change fails loudly.
+        env_accounts = config.TWITTER_ACCOUNTS
+        pool_accounts = await api.pool.get_all()
+        if not pool_accounts and not env_accounts:
             # Not configured at all — that's a valid setup (this collector is
             # optional), so skip cleanly instead of failing the run with a
             # twscrape traceback every cycle.
@@ -92,12 +95,10 @@ class TwitterCollector(BaseCollector):
             )
             return []
 
-        existing = {a["username"] for a in pool_info}
-        added = False
+        existing = {a.username for a in pool_accounts}
         for acc in env_accounts:
             if acc["username"] not in existing:
                 await api.pool.add_account(**acc)
-                added = True
                 # New accounts still need a login pass to get session tokens;
                 # setup_twitter.sh does that. Flag it so a silently-unusable
                 # account is obvious rather than looking merely idle.
@@ -106,20 +107,22 @@ class TwitterCollector(BaseCollector):
                     "scripts/setup_twitter.sh to log it in if not already done",
                     acc["username"],
                 )
-        if added:
-            pool_info = await api.pool.accounts_info()
+        # Re-fetch unconditionally: cookie-based adds become active immediately,
+        # and the none-active check below must see current state.
+        pool_accounts = await api.pool.get_all()
 
-        if pool_info and not any(a.get("active") for a in pool_info):
-            # Registered but never (successfully) logged in — every request
-            # would fail with twscrape's "no account available". Say what's
-            # wrong and what fixes it, then skip this run.
-            logger.warning(
-                "[twitter] skipping — %d account(s) registered but none are logged "
-                "in. Run scripts/setup_twitter.sh; if password login is blocked by "
-                "X (code 399), use browser cookies (docs/SETUP.md Step 5).",
-                len(pool_info),
+        if not any(a.active for a in pool_accounts):
+            # No usable account — either never logged in, or X has since
+            # locked/suspended it. This is a real outage of the collector, so
+            # raise: BaseCollector.run records it as a failed run in
+            # collection_runs instead of a healthy-looking found=0.
+            raise RuntimeError(
+                f"{len(pool_accounts)} Twitter account(s) registered but none are "
+                "active. If never logged in: run scripts/setup_twitter.sh. If it "
+                "was working before, X may have locked the account — re-auth with "
+                "fresh browser cookies after deleting src/accounts.db "
+                "(docs/SETUP.md Step 5)."
             )
-            return []
 
         # Resolve user ID once
         user = await api.user_by_login(config.TWITTER_TARGET_USER)
