@@ -78,10 +78,14 @@ class TwitterCollector(BaseCollector):
         # the pool — this picks up a newly-added/rotated account in
         # TWITTER_ACCOUNTS_JSON without forcing a manual accounts.db delete,
         # while skipping already-present ones (re-adding just warns and no-ops).
-        # config.TWITTER_ACCOUNTS is pre-parsed (blank/invalid env handled there);
+        # config.TWITTER_ACCOUNTS is pre-parsed and validated; a broken env
+        # value surfaces here as a failed twitter run (recorded in
+        # collection_runs) instead of crashing the whole app at import.
+        if config.TWITTER_ACCOUNTS_ERROR:
+            raise RuntimeError(config.TWITTER_ACCOUNTS_ERROR)
+        env_accounts = config.TWITTER_ACCOUNTS
         # pool.get_all() returns typed Account objects (.username/.active) rather
         # than the accounts_info() display dicts, so a shape change fails loudly.
-        env_accounts = config.TWITTER_ACCOUNTS
         pool_accounts = await api.pool.get_all()
         if not pool_accounts and not env_accounts:
             # Not configured at all — that's a valid setup (this collector is
@@ -118,10 +122,9 @@ class TwitterCollector(BaseCollector):
             # collection_runs instead of a healthy-looking found=0.
             raise RuntimeError(
                 f"{len(pool_accounts)} Twitter account(s) registered but none are "
-                "active. If never logged in: run scripts/setup_twitter.sh. If it "
-                "was working before, X may have locked the account — re-auth with "
-                "fresh browser cookies after deleting src/accounts.db "
-                "(docs/SETUP.md Step 5)."
+                "active — never logged in, or X has since locked the account. "
+                "Run scripts/setup_twitter.sh; see docs/SETUP.md Step 5 for the "
+                "browser-cookie re-auth procedure."
             )
 
         # Resolve user ID once

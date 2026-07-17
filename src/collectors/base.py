@@ -8,12 +8,23 @@ deduplication calls, and error handling.
 
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
+from html import unescape
+from re import compile as re_compile
 from typing import Optional
 import logging
 
-from database.database import upsert_item, log_run, finish_run
+from database.database import upsert_item, log_run, finish_run, DatabaseError
 
 logger = logging.getLogger(__name__)
+
+# Shared HTML→plain-text for collectors whose sources return markup
+# (Truth Social post HTML, RSS content:encoded). Lives here so peer
+# collectors don't reach into each other's internals for it.
+_TAG_RE = re_compile(r"<[^>]+>")
+
+
+def strip_html(text: str) -> str:
+    return unescape(_TAG_RE.sub("", text)).strip()
 
 
 class CollectedItem:
@@ -53,7 +64,18 @@ class BaseCollector(ABC):
           {"source": str, "found": int, "new": int, "error": str|None}
         """
         started = datetime.now(timezone.utc)
-        run_id = log_run(self.source_name, started)
+        try:
+            run_id = log_run(self.source_name, started)
+        except DatabaseError as exc:
+            # DB down before we could even open the run — nothing can be
+            # recorded, so skip cleanly instead of dumping a raw traceback.
+            logger.error(
+                "[%s] database unavailable — skipping this run; it will be "
+                "retried next cycle: %s", self.source_name, exc,
+            )
+            return {"source": self.source_name, "found": 0, "new": 0,
+                    "error": f"database unavailable: {exc}"}
+
         error_msg = None
         items: list[CollectedItem] = []
 
@@ -78,10 +100,26 @@ class BaseCollector(ABC):
                 if is_new:
                     new_count += 1
                     logger.info("[%s] new item: %s", self.source_name, item.external_id)
+            except DatabaseError as exc:
+                # Systemic DB failure, not this item's fault — one message and
+                # stop, rather than a warning per remaining item.
+                error_msg = f"database error during upsert: {exc}"
+                logger.error(
+                    "[%s] %s — aborting this run's remaining upserts; the items "
+                    "will be re-collected next cycle.", self.source_name, error_msg,
+                )
+                break
             except Exception as exc:
                 logger.warning("[%s] failed to upsert %s: %s", self.source_name, item.external_id, exc)
 
-        finish_run(run_id, len(items), new_count, error_msg)
+        try:
+            finish_run(run_id, len(items), new_count, error_msg)
+        except DatabaseError as exc:
+            logger.error(
+                "[%s] database error recording the run result (run row stays "
+                "open): %s", self.source_name, exc,
+            )
+            error_msg = error_msg or f"database unavailable: {exc}"
 
         summary = {
             "source":  self.source_name,
