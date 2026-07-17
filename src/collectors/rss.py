@@ -17,7 +17,7 @@ import feedparser
 import requests
 
 from config import config
-from .base import BaseCollector, CollectedItem
+from .base import BaseCollector, CollectedItem, strip_html
 
 logger = logging.getLogger(__name__)
 
@@ -82,14 +82,15 @@ def _parse_feed(session, feed_url: str, log_prefix: str):
     return feed
 
 
-def _is_relevant(entry) -> bool:
-    """Return True if the entry contains at least one filter keyword (case-insensitive)."""
-    text = " ".join([
-        getattr(entry, "title", ""),
-        getattr(entry, "summary", ""),
-        _entry_body_html(entry),
-    ]).lower()
-    return any(kw.lower() in text for kw in config.RSS_FILTER_KEYWORDS)
+def _is_relevant(text: str) -> bool:
+    """True if the (already HTML-stripped) text contains a filter keyword.
+
+    Takes stripped text, not the entry: matching against raw HTML would let a
+    keyword inside an href/attribute admit an irrelevant article — and every
+    kept item costs a full LLM inference later.
+    """
+    lowered = text.lower()
+    return any(kw.lower() in lowered for kw in config.RSS_FILTER_KEYWORDS)
 
 
 class RSSCollector(BaseCollector):
@@ -113,46 +114,56 @@ class RSSCollector(BaseCollector):
         items: list[CollectedItem] = []
 
         for entry in feed.entries:
-            if not _is_relevant(entry):
-                continue
+            # Isolate each entry: one malformed entry must not discard the rest
+            # of the run's items (mirrors the whitehouse/truth_social guards).
+            try:
+                title = getattr(entry, "title", "").strip()
+                # Strip markup BEFORE filtering and storing: raw feed HTML
+                # ('<p><a href=…') would otherwise both admit keyword hits
+                # hiding inside hrefs and burn inference tokens on tags.
+                summary = strip_html(getattr(entry, "summary", ""))
+                body = strip_html(_entry_body_html(entry))
 
-            title = getattr(entry, "title", "").strip()
-            summary = getattr(entry, "summary", "").strip()
-            body = _entry_body_html(entry)
+                if not _is_relevant(f"{title} {summary} {body}"):
+                    continue
 
-            # Prefer full content over summary
-            text = body or summary
-            if not text and not title:
-                continue
+                # Prefer full content over summary; both are already stripped,
+                # so a markup-only body (image/embed) falls back to the summary.
+                text = body or summary
+                if not text and not title:
+                    continue
 
-            content = f"{title}\n\n{text}".strip() if title else text
+                content = f"{title}\n\n{text}".strip() if title else text
 
-            # Use entry link as canonical ID; fall back to a hash of title+date
-            link = getattr(entry, "link", None)
-            if link:
-                external_id = _hash_external_id(link)
-            else:
-                external_id = _hash_external_id(
-                    f"{feed_url}:{title}:{getattr(entry, 'published', '')}"
+                # Use entry link as canonical ID; fall back to a hash of title+date
+                link = getattr(entry, "link", None)
+                if link:
+                    external_id = _hash_external_id(link)
+                else:
+                    external_id = _hash_external_id(
+                        f"{feed_url}:{title}:{getattr(entry, 'published', '')}"
+                    )
+
+                published_at = _parse_date(entry)
+
+                items.append(
+                    CollectedItem(
+                        external_id=external_id,
+                        content=content,
+                        url=link,
+                        author=feed_title,
+                        published_at=published_at,
+                        raw_json={
+                            "feed_url":   feed_url,
+                            "feed_title": feed_title,
+                            "entry_id":   getattr(entry, "id", None),
+                            "title":      title,
+                        },
+                    )
                 )
-
-            published_at = _parse_date(entry)
-
-            items.append(
-                CollectedItem(
-                    external_id=external_id,
-                    content=content,
-                    url=link,
-                    author=feed_title,
-                    published_at=published_at,
-                    raw_json={
-                        "feed_url":   feed_url,
-                        "feed_title": feed_title,
-                        "entry_id":   getattr(entry, "id", None),
-                        "title":      title,
-                    },
-                )
-            )
+            except Exception as exc:
+                logger.warning("[rss] skipping malformed entry in %s: %s", feed_url, exc)
+                continue
 
         logger.debug("[rss] feed %s → %d relevant items", feed_url, len(items))
         return items

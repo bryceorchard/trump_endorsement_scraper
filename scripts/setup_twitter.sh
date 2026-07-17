@@ -19,13 +19,18 @@ echo "Registering Twitter account(s) with twscrape..."
 # login_all() logs errors but does NOT raise, so we inspect account status
 # afterwards and exit non-zero if nothing actually logged in.
 if "$PY" -c "
-import asyncio, json, sys
+import asyncio, sys
 from config import config
 from twscrape import AccountsPool
 
+# Same parsed/validated account list the collector uses — one parse path.
+if config.TWITTER_ACCOUNTS_ERROR:
+    print(config.TWITTER_ACCOUNTS_ERROR, file=sys.stderr)
+    sys.exit(2)
+
 async def register():
     pool = AccountsPool()
-    for acc in json.loads(config.TWITTER_ACCOUNTS_JSON):
+    for acc in config.TWITTER_ACCOUNTS:
         await pool.add_account(**acc)
     await pool.login_all()
     info = await pool.accounts_info()

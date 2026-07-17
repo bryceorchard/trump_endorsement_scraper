@@ -11,8 +11,6 @@ Rate limiting: if you get 429s, increase INTERVAL_TRUTH_SOCIAL in config.
 
 import logging
 from datetime import datetime, timezone
-from html import unescape
-from re import compile as re_compile
 
 import requests
 
@@ -22,16 +20,9 @@ except ImportError:  # collector degrades to plain requests (Cloudflare will 403
     cffi_requests = None
 
 from config import config
-from .base import BaseCollector, CollectedItem
+from .base import BaseCollector, CollectedItem, strip_html
 
 logger = logging.getLogger(__name__)
-
-# Strip HTML tags from post content (Truth Social returns HTML-formatted text)
-_TAG_RE = re_compile(r"<[^>]+>")
-
-
-def _strip_html(text: str) -> str:
-    return unescape(_TAG_RE.sub("", text)).strip()
 
 
 class TruthSocialCollector(BaseCollector):
@@ -109,12 +100,12 @@ class TruthSocialCollector(BaseCollector):
             # Isolate each status: one malformed post must not discard the rest.
             try:
                 content_html = status.get("content", "")
-                content_text = _strip_html(content_html)
+                content_text = strip_html(content_html)
 
                 # Include reblogs (re-truths) — unwrap the reblogged content
                 if not content_text and status.get("reblog"):
                     rb = status["reblog"]
-                    content_text = _strip_html(rb.get("content", ""))
+                    content_text = strip_html(rb.get("content", ""))
 
                 if not content_text:
                     continue  # media-only post, skip

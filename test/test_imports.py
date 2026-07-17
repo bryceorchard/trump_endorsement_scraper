@@ -49,9 +49,15 @@ def _stub_missing_pi_deps() -> None:
     if importlib.util.find_spec("twscrape") is None:
         _stub("twscrape")
     if importlib.util.find_spec("psycopg2") is None:
-        _stub("psycopg2", connect=lambda *a, **k: None)
+        # Error must be a real exception class: database.py aliases it
+        # (DatabaseError = psycopg2.Error) and callers use it in `except`.
+        _psycopg2_error = type("Error", (Exception,), {})
+        _stub("psycopg2", connect=lambda *a, **k: None, Error=_psycopg2_error)
         _stub("psycopg2.extras", RealDictCursor=object, Json=object)
+        _stub("psycopg2.extensions",
+              parse_dsn=lambda dsn: {}, make_dsn=lambda **kw: "")
         sys.modules["psycopg2"].extras = sys.modules["psycopg2.extras"]
+        sys.modules["psycopg2"].extensions = sys.modules["psycopg2.extensions"]
 
 
 # Modules the pipeline imports, in dependency order. Each entry is imported and,

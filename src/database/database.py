@@ -9,6 +9,7 @@ Tables:
 """
 
 import psycopg2
+from psycopg2.extensions import parse_dsn, make_dsn
 from psycopg2.extras import RealDictCursor
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -17,6 +18,31 @@ from typing import Optional
 from config import config
 
 DATABASE_URL = config.DATABASE_URL
+
+# Re-exported so callers can catch DB-transport failures without importing
+# psycopg2 themselves (this module stays the only one that knows the driver).
+# Covers OperationalError (server down) and ProgrammingError (malformed DSN).
+DatabaseError = psycopg2.Error
+
+
+def redact_dsn(dsn: str) -> str:
+    """DATABASE_URL made safe for error messages.
+
+    Parses with libpq's own rules (URL or key=value form; quoted values;
+    ?password= query params; percent-encoded specials) instead of
+    approximating them with a regex, then rebuilds from an allowlist of
+    non-secret fields — so the password, sslpassword, or any other param is
+    never echoed no matter which DSN form carried it. Unparseable input is
+    not echoed at all.
+    """
+    try:
+        params = parse_dsn(dsn)
+    except Exception:
+        return "<unparseable DSN — value hidden>"
+    safe = {k: v for k, v in params.items() if k in ("host", "port", "dbname", "user")}
+    if params.get("password"):
+        safe["password"] = "***"
+    return make_dsn(**safe) or "<empty DSN>"
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -55,11 +81,21 @@ ALTER TABLE items ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
 -- Count detector timeouts per item so a poison item can be given up on after a
 -- bounded number of retries instead of being retried forever.
 ALTER TABLE items ADD COLUMN IF NOT EXISTS detection_attempts INTEGER NOT NULL DEFAULT 0;
+-- When a timed-out item may next be retried (NULL = immediately eligible).
+-- Persisted so retry spacing survives restarts and applies in every run mode.
+ALTER TABLE items ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_items_published  ON items (published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_items_source     ON items (source_id);
 CREATE INDEX IF NOT EXISTS idx_items_fetched    ON items (fetched_at DESC);
-CREATE INDEX IF NOT EXISTS idx_items_unprocessed ON items (id) WHERE processed_at IS NULL;
+-- Serves the newest-first detection batch (same expression AND id tiebreak as
+-- get_unprocessed_items' ORDER BY, so the LIMIT scan needs no extra sort) and
+-- COUNT of the unprocessed queue. Supersedes idx_items_unprocessed and the
+-- tiebreak-less idx_items_detection_queue.
+DROP INDEX IF EXISTS idx_items_unprocessed;
+DROP INDEX IF EXISTS idx_items_detection_queue;
+CREATE INDEX IF NOT EXISTS idx_items_queue_order
+    ON items ((COALESCE(published_at, fetched_at)) DESC, id DESC) WHERE processed_at IS NULL;
 
 -- Endorsement detection results — one row per analyzed item
 CREATE TABLE IF NOT EXISTS endorsements (
@@ -213,7 +249,17 @@ def finish_run(run_id: int, items_found: int, items_new: int, error: Optional[st
 def get_unprocessed_items(batch_size: int = 50) -> list[dict]:
     """
     Return up to batch_size items that have not yet been run through the
-    endorsement detector (processed_at IS NULL), oldest first.
+    endorsement detector (processed_at IS NULL), **newest content first**.
+
+    Newest-first means a fresh post is always analyzed before backlog (a first
+    run backfills years of old tweets, and alerting on those is worthless);
+    once everything new is processed, later batches naturally work backwards
+    through the older items. Items with no published date count as fresh from
+    the moment they were fetched (COALESCE with fetched_at) rather than
+    sorting behind the entire dated backlog.
+
+    Items cooling down after a detector timeout (next_attempt_at in the
+    future — see record_detection_attempt) are skipped until eligible.
     """
     with db_cursor() as cur:
         cur.execute(
@@ -222,7 +268,8 @@ def get_unprocessed_items(batch_size: int = 50) -> list[dict]:
             FROM items i
             JOIN sources s ON s.id = i.source_id
             WHERE i.processed_at IS NULL
-            ORDER BY i.fetched_at ASC
+              AND (i.next_attempt_at IS NULL OR i.next_attempt_at <= NOW())
+            ORDER BY COALESCE(i.published_at, i.fetched_at) DESC, i.id DESC
             LIMIT %s
             """,
             (batch_size,),
@@ -230,18 +277,36 @@ def get_unprocessed_items(batch_size: int = 50) -> list[dict]:
         return [dict(row) for row in cur.fetchall()]
 
 
-def record_detection_attempt(item_id: int) -> int:
-    """Increment the item's detector-timeout counter and return the new count.
+def count_unprocessed_items() -> int:
+    """Total items still awaiting detection — lets the caller tell the user
+    how much of the queue a single batch covers."""
+    with db_cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM items WHERE processed_at IS NULL")
+        return cur.fetchone()["n"]
 
-    Used to bound retries of items that keep timing out (see run_detection).
+
+def record_detection_attempt(item_id: int) -> Optional[int]:
+    """Record a detector timeout: bump the item's attempt counter and start its
+    retry cooldown (DETECTION_RETRY_COOLDOWN). Returns the new attempt count,
+    or None if the item no longer exists.
+
+    Used to bound and space retries of items that keep timing out — the
+    cooldown lives in the DB so it applies in every run mode and survives
+    restarts (see run_detection).
     """
     with db_cursor() as cur:
         cur.execute(
-            "UPDATE items SET detection_attempts = detection_attempts + 1 "
-            "WHERE id = %s RETURNING detection_attempts",
-            (item_id,),
+            """
+            UPDATE items
+            SET detection_attempts = detection_attempts + 1,
+                next_attempt_at = NOW() + make_interval(secs => %s)
+            WHERE id = %s
+            RETURNING detection_attempts
+            """,
+            (config.DETECTION_RETRY_COOLDOWN, item_id),
         )
-        return cur.fetchone()["detection_attempts"]
+        row = cur.fetchone()
+        return row["detection_attempts"] if row else None
 
 
 def save_endorsement(item_id: int, result) -> None:

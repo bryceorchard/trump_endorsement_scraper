@@ -12,6 +12,7 @@ Usage:
 import json
 import requests
 from dataclasses import dataclass
+from re import compile as re_compile
 from typing import Optional
 
 from config import config
@@ -23,6 +24,18 @@ MODEL      = config.OLLAMA_MODEL
 # literally says "or null"), normalized to None so they don't count as a real
 # company/ticker or pollute the DB.
 _NULLISH = {"", "null", "none", "n/a", "n.a.", "unknown"}
+
+# The model must stay within these enums; anything else is coerced to the
+# conservative value so a creative answer ("very high") can't skew alerting.
+_CONFIDENCES = {"high", "medium", "low"}
+_TYPES = {"explicit", "implicit", "financial", "none"}
+
+# Plausible exchange-symbol shape (e.g. AAPL, DJT, BRK.B). NOTE: a match only
+# means well-formed — the model guesses tickers from company names and can be
+# confidently wrong (seen live: TMTG for Trump Media, whose real symbol is
+# DJT), so treat any stored ticker as unverified until checked against a real
+# symbol source.
+_TICKER_RE = re_compile(r"^[A-Z]{1,5}([.-][A-Z]{1,2})?$")
 
 
 class DetectionTimeout(Exception):
@@ -84,9 +97,12 @@ def detect_endorsement(text: str, timeout: int | None = None) -> EndorsementResu
         EndorsementResult dataclass
 
     Raises:
-        RuntimeError: Ollama is unreachable or the request failed (down, timed
-            out, model not pulled, 5xx). The caller should pause detection and
-            leave items unprocessed — these failures are not the item's fault.
+        RuntimeError: Ollama is unreachable or the request failed (down, model
+            not pulled, 5xx). The caller should pause detection and leave items
+            unprocessed — these failures are not the item's fault.
+        DetectionTimeout: this one call exceeded the timeout. The caller
+            retries the item on a later run (bounded by DETECTION_MAX_ATTEMPTS)
+            rather than pausing the loop.
         ValueError: the model responded but with unparseable output; safe to
             treat as a per-item failure.
     """
@@ -113,7 +129,10 @@ def detect_endorsement(text: str, timeout: int | None = None) -> EndorsementResu
         response = requests.post(OLLAMA_URL, json=payload, timeout=timeout)
         response.raise_for_status()
     except requests.exceptions.ConnectionError as exc:
-        raise RuntimeError("Ollama is not running. Start it with: ollama serve") from exc
+        raise RuntimeError(
+            "Ollama is not running — start it with `ollama serve` "
+            "(see docs/SETUP.md Step 1)"
+        ) from exc
     except requests.exceptions.Timeout as exc:
         # A single call timing out usually means THIS item is too long, not that
         # Ollama is down — raise a distinct type so the caller skips the item
@@ -121,7 +140,10 @@ def detect_endorsement(text: str, timeout: int | None = None) -> EndorsementResu
         raise DetectionTimeout(f"Ollama timed out after {timeout}s") from exc
     except requests.exceptions.RequestException as exc:
         # HTTP 404 (model not pulled), 5xx, other transport errors → pause.
-        raise RuntimeError(f"Ollama request failed: {exc}") from exc
+        raise RuntimeError(
+            f"Ollama request failed: {exc} — if the model isn't pulled, run "
+            f"`ollama pull {MODEL}` (see docs/SETUP.md Step 1)"
+        ) from exc
 
     raw_response = ""
     try:
@@ -137,13 +159,27 @@ def detect_endorsement(text: str, timeout: int | None = None) -> EndorsementResu
     except (json.JSONDecodeError, KeyError, IndexError) as e:
         raise ValueError(f"Model returned invalid JSON: {raw_response[:500]!r}") from e
 
+    confidence = data.get("confidence", "low")
+    if confidence not in _CONFIDENCES:
+        confidence = "low"
+
+    endorsement_type = data.get("endorsement_type", "none")
+    if endorsement_type not in _TYPES:
+        endorsement_type = "none"
+
+    ticker = _nullish_to_none(data.get("ticker"))
+    if ticker is not None:
+        ticker = str(ticker).strip().upper()
+        if not _TICKER_RE.match(ticker):
+            ticker = None   # free text is not a symbol — drop, keep the company
+
     return EndorsementResult(
-        endorsement_detected=data.get("endorsement_detected", False),
+        endorsement_detected=bool(data.get("endorsement_detected", False)),
         company=_nullish_to_none(data.get("company")),
-        ticker=_nullish_to_none(data.get("ticker")),
-        confidence=data.get("confidence", "low"),
+        ticker=ticker,
+        confidence=confidence,
         quote=_nullish_to_none(data.get("quote")),
-        endorsement_type=data.get("endorsement_type", "none"),
+        endorsement_type=endorsement_type,
         raw_text=text,
     )
 
@@ -167,6 +203,8 @@ def is_actionable(result: EndorsementResult) -> bool:
 
 # ── Quick test ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    import sys
+
     test_cases = [
         "Just had a GREAT meeting with Tim Cook. Apple is doing TREMENDOUS things for America!",
         "The fake news media is at it again. Very sad!",
@@ -176,7 +214,17 @@ if __name__ == "__main__":
 
     for text in test_cases:
         print(f"\nInput: {text[:80]}...")
-        result = detect_endorsement(text)
+        try:
+            result = detect_endorsement(text)
+        except (RuntimeError, DetectionTimeout) as exc:
+            # The exception message already carries the remediation steps.
+            print(f"\nDetector unavailable: {exc}", file=sys.stderr)
+            sys.exit(1)
+        except ValueError as exc:
+            # Unparseable model output is a per-case failure — report and
+            # keep testing the remaining samples.
+            print(f"  Unparseable model output: {exc}", file=sys.stderr)
+            continue
         print(f"  Detected:  {result.endorsement_detected}")
         print(f"  Company:   {result.company}")
         print(f"  Ticker:    {result.ticker}")

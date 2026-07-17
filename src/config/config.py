@@ -8,13 +8,29 @@ quotes — see src/.env.example.
 """
 
 import json as _json
+import logging as _logging
 import os
+
+_log = _logging.getLogger(__name__)
 
 
 def _json_env(name: str, default: str):
     """Parse a JSON-valued env var, failing with the variable name and value
-    instead of an anonymous JSONDecodeError from deep inside json."""
-    raw = os.getenv(name, default)
+    instead of an anonymous JSONDecodeError from deep inside json.
+
+    A variable that is set but blank falls back to the default — with a warning,
+    because for vars whose default is non-empty (e.g. RSS_FEEDS_JSON) blanking
+    does NOT disable the feature, it silently re-enables the default; disabling
+    requires an explicit '[]'."""
+    raw = os.getenv(name)
+    if raw is not None and not raw.strip():
+        _log.warning(
+            "%s is set but blank — using the built-in default. To disable the "
+            "feature instead, set %s='[]' explicitly.", name, name,
+        )
+        raw = None
+    if raw is None:
+        raw = default
     try:
         return _json.loads(raw)
     except _json.JSONDecodeError as exc:
@@ -38,7 +54,32 @@ TRUTH_SOCIAL_LIMIT       = int(os.getenv("TRUTH_SOCIAL_LIMIT", "40"))
 # ── X / Twitter ──────────────────────────────────────────────────────────────
 # twscrape needs at least one Twitter account. Add credentials as JSON list:
 # '[{"username":"u","password":"p","email":"e","email_password":"ep"}]'
-TWITTER_ACCOUNTS_JSON = os.getenv("TWITTER_ACCOUNTS_JSON", "[]")
+def _load_twitter_accounts() -> tuple[list, "str | None"]:
+    """Parse + validate TWITTER_ACCOUNTS_JSON without being fatal at import.
+
+    The twitter collector is optional, so a typo here must fail ONLY the
+    twitter runs (surfaced via TWITTER_ACCOUNTS_ERROR and recorded in
+    collection_runs) — never crash the whole app / systemd service.
+    """
+    try:
+        accounts = _json_env("TWITTER_ACCOUNTS_JSON", "[]")
+    except RuntimeError as exc:
+        return [], str(exc)
+    if not isinstance(accounts, list) or not all(
+        isinstance(a, dict) and a.get("username") for a in accounts
+    ):
+        return [], (
+            "TWITTER_ACCOUNTS_JSON must be a JSON *array* of account objects, "
+            'each with at least a "username" — e.g. '
+            "'[{\"username\":\"u\",\"password\":\"p\",\"email\":\"e\","
+            "\"email_password\":\"ep\"}]' (see src/.env.example)"
+        )
+    return accounts, None
+
+
+# Parsed + validated account list; TWITTER_ACCOUNTS_ERROR is None when usable.
+# Consumers use these — nothing should re-parse the raw env string.
+TWITTER_ACCOUNTS, TWITTER_ACCOUNTS_ERROR = _load_twitter_accounts()
 TWITTER_TARGET_USER   = os.getenv("TWITTER_TARGET_USER", "realDonaldTrump")
 TWITTER_TWEET_LIMIT   = int(os.getenv("TWITTER_TWEET_LIMIT", "40"))
 
@@ -97,3 +138,7 @@ DETECTION_BATCH_SIZE = int(os.getenv("DETECTION_BATCH_SIZE", "10"))  # items per
 # gets another chance, but a genuinely-too-long "poison" item can't retry
 # forever and starve newer items out of the batch.
 DETECTION_MAX_ATTEMPTS = int(os.getenv("DETECTION_MAX_ATTEMPTS", "3"))
+# Seconds before a timed-out item becomes eligible for retry (persisted in
+# items.next_attempt_at). Spaces the retries out so a transient Ollama slowdown
+# can't burn an item's whole attempt budget back-to-back — in any run mode.
+DETECTION_RETRY_COOLDOWN = int(os.getenv("DETECTION_RETRY_COOLDOWN", "600"))
