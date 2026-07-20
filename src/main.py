@@ -40,6 +40,7 @@ from collectors import (
     WhiteHouseCollector,
     RSSCollector,
 )
+from webhook.webhook import send_discord_message
 
 logging.basicConfig(
     level=logging.INFO,
@@ -193,18 +194,17 @@ def _run_detection_batch() -> BatchResult:
 
             if is_actionable(result):
                 hits += 1
-                logger.warning(
-                    "🚨 ENDORSEMENT DETECTED | company=%-20s ticker=%-6s "
-                    "confidence=%-6s type=%-10s source=%s | %s",
-                    result.company or "?",
-                    result.ticker or "-",
-                    result.confidence,
-                    result.endorsement_type,
-                    item["source_name"],
-                    item.get("url") or "(no url)",
-                )
-                if result.quote:
-                    logger.warning('   Quote: "%s"', result.quote)
+                # Alerting is best-effort and MUST NOT disturb the item we just
+                # saved: isolate it so a formatting or Discord error can't fall
+                # through to the "mark processed (no detection)" handler below
+                # and overwrite the real result.
+                try:
+                    _alert(result, item)
+                except Exception as exc:
+                    logger.error(
+                        "[detection] alerting failed for item %s (detection is "
+                        "saved): %s", item["id"], exc,
+                    )
 
         except DatabaseError:
             # DB-transport problem, not this item's fault — never mark the item
@@ -264,6 +264,20 @@ def _run_detection_batch() -> BatchResult:
     return BatchResult(queue_empty=False, ok=ok, progressed=analyzed + gave_up)
 
 
+def _alert(result, item: dict) -> None:
+    """Log an actionable endorsement and post it to Discord (best-effort)."""
+    message = (
+        "🚨 ENDORSEMENT DETECTED\n"
+        f"company: {result.company or '?'}\n"
+        f"ticker:  {result.ticker or '-'} (unverified — model-guessed)\n"
+        f"confidence: {result.confidence}   type: {result.endorsement_type}\n"
+        f"source: {item['source_name']}   {item.get('url') or '(no url)'}\n"
+        f"quote: {result.quote or '(no quote)'}"
+    )
+    logger.warning(message)
+    send_discord_message(message)   # never raises; logs its own failures
+
+
 def _make_error_result(text: str):
     """Fallback result used when the LLM call fails, so we don't retry forever."""
     from detector.endorsement_detector import EndorsementResult
@@ -273,7 +287,7 @@ def _make_error_result(text: str):
         ticker=None,
         confidence="low",
         quote=None,
-        endorsement_type="none",
+        endorsement_type=None,
         raw_text=text,
     )
 
