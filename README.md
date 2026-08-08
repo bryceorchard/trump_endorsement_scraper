@@ -57,8 +57,9 @@ that implies support), `financial` (references a stock/crypto/financial product)
 `none`. A detection is considered **actionable** when confidence is `high` or `medium` and
 the type isn't `none`.
 
-> **Note:** actionable detections are logged, but alerting/notifications are not yet
-> implemented.
+Actionable detections are logged and, when `DISCORD_WEBHOOK_URL` is set, posted to a
+Discord channel. Alerting is best-effort and isolated, so a failed send never disturbs
+the saved detection; unset the webhook to log only.
 
 ## Requirements
 
@@ -110,17 +111,68 @@ The `scripts/` directory has convenience wrappers (`run_once.sh`, `start.sh`,
 
 ## Configuration
 
-All configuration is environment-variable driven and documented in
-[`src/.env.example`](src/.env.example). Highlights:
+All configuration is environment-variable driven with sensible defaults, and is
+documented inline in [`src/.env.example`](src/.env.example) — copy that to `src/.env`
+and edit. Most deployments only need `DATABASE_URL` (plus `TWITTER_ACCOUNTS_JSON` to
+enable Twitter); everything else has a working default. The full set:
 
-| Variable | Purpose |
-| --- | --- |
-| `DATABASE_URL` | Postgres connection string. |
-| `DETECTION_ENABLED` | Set `false` to collect without running the LLM. |
-| `TWITTER_ACCOUNTS_JSON` | Required to enable the Twitter collector. |
-| `RSS_FEEDS_JSON` / `RSS_FILTER_KEYWORDS` | Override the default feed list / relevance keywords. |
-| `INTERVAL_*` | Per-source polling intervals (seconds) for scheduled mode. |
-| `OLLAMA_MODEL` / `OLLAMA_TIMEOUT` | Model name and per-inference timeout. |
+### Database
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | `postgresql://localhost/trump_tracker` | Postgres connection string. |
+
+### Source options
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TRUTH_SOCIAL_ACCOUNT_ID` | `107780257626128497` | Trump's Mastodon-compatible account ID. |
+| `TRUTH_SOCIAL_BASE_URL` | `https://truthsocial.com` | Truth Social API host. |
+| `TRUTH_SOCIAL_LIMIT` | `40` | Posts fetched per Truth Social run. |
+| `TWITTER_ACCOUNTS_JSON` | _(empty)_ | JSON array of twscrape accounts. **Required to enable the Twitter collector** — empty means it's skipped. Often needs browser cookies, not just a password (see [docs/SETUP.md](docs/SETUP.md) Step 5). |
+| `TWITTER_TARGET_USER` | `realDonaldTrump` | Twitter/X handle to scrape. |
+| `TWITTER_TWEET_LIMIT` | `40` | Tweets fetched per Twitter run. |
+| `WHITEHOUSE_BASE_URL` | `https://www.whitehouse.gov` | White House site host. |
+| `WHITEHOUSE_LIMIT` | `20` | Articles fetched per White House run. |
+| `RSS_FEEDS_JSON` | _(9 politics feeds)_ | JSON array of RSS feed URLs to poll. |
+| `RSS_FILTER_KEYWORDS` | `["trump","donald"]` | Only RSS entries containing one of these keywords are saved. |
+
+### Scheduling
+
+Scheduled mode only, in seconds. Each job also fires once on startup.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `INTERVAL_TRUTH_SOCIAL` | `300` | Truth Social poll interval. |
+| `INTERVAL_TWITTER` | `600` | Twitter poll interval. |
+| `INTERVAL_WHITEHOUSE` | `900` | White House poll interval. |
+| `INTERVAL_RSS` | `600` | RSS poll interval. |
+| `INTERVAL_DETECTION` | `120` | Detection-pass interval (no job scheduled when `DETECTION_ENABLED=false`). |
+
+### HTTP
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `REQUEST_TIMEOUT` | `30` | Per-request HTTP timeout (seconds). |
+| `USER_AGENT` | `Mozilla/5.0 (compatible; trump-tracker/1.0; …)` | User-Agent header for outbound requests. |
+
+### Detection (Ollama)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DETECTION_ENABLED` | `true` | Set `false` to collect without the LLM — items queue up unprocessed until it's re-enabled. |
+| `OLLAMA_URL` | `http://localhost:11434/api/generate` | Ollama generate endpoint. |
+| `OLLAMA_MODEL` | `qwen3:8b` | Model used for detection. |
+| `OLLAMA_TIMEOUT` | `180` | Seconds per inference — generous, because the first call after idle also loads the model into RAM. |
+| `DETECTION_BATCH_SIZE` | `10` | Items analyzed per detection pass (newest content first). |
+| `DETECTION_MAX_ATTEMPTS` | `3` | Times a single item may time out before it's given up on and marked processed. |
+| `DETECTION_RETRY_COOLDOWN` | `600` | Seconds before a timed-out item becomes eligible for retry. |
+
+### Alerting
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DISCORD_WEBHOOK_URL` | _(empty)_ | Discord webhook that actionable endorsements are posted to. **Secret** — set it in `src/.env`, never commit it. Unset = detections are logged only. |
 
 ## Project layout
 
@@ -148,6 +200,5 @@ systemd unit, and Twitter/`twscrape` account registration — are in
 
 ## Status
 
-Working: all four collectors, Postgres storage/dedup, and local LLM detection.
-
-Not yet implemented: alerting/notifications on actionable detections.
+Working: all four collectors, Postgres storage/dedup, local LLM detection, and
+Discord alerting on actionable detections (best-effort, gated on `DISCORD_WEBHOOK_URL`).

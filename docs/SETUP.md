@@ -151,7 +151,8 @@ The helper scripts each load `src/.env`, `cd` into `src/`, and run with the venv
 
 ```bash
 scripts/run_once.sh        # initialise the DB schema + run all collectors + detection once
-scripts/test_detector.sh   # test the endorsement detector directly (requires Ollama running)
+scripts/test_detector.sh   # end-to-end alert test: detect a sample endorsement, then post it to
+                           # Discord (needs Ollama running + DISCORD_WEBHOOK_URL set in src/.env)
 ```
 
 For finer-grained checks you can still call the CLI directly (from `src/`, with the venv active and

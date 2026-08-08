@@ -10,7 +10,11 @@ apscheduler>=3.10
 curl_cffi>=0.10
 
 # Twitter scraping (no paid API needed)
-twscrape>=0.12
+# >=0.19.2: X now serves a logged-out web build that omits the animation-indices
+# script twscrape needs for the x-client-transaction-id header. 0.19.2 fetches
+# those assets with the account's cookies so X returns the authenticated build
+# that contains it; older versions fail with "Couldn't get XClientTxId indices script".
+twscrape>=0.19.2
 
 # HTML parsing speed boost (optional but recommended on Pi)
 lxml>=5.0
