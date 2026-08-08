@@ -64,7 +64,7 @@ Respond ONLY with valid JSON in this exact format:
   "ticker": "Stock ticker if known or null",
   "confidence": "high" | "medium" | "low",
   "quote": "The specific phrase that indicates endorsement, or null",
-  "endorsement_type": "explicit" | "implicit" | "financial" | "null"
+  "endorsement_type": "explicit" | "implicit" | "financial" | null
 }
 
 endorsement_type definitions:

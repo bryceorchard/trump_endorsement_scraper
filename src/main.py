@@ -40,7 +40,7 @@ from collectors import (
     WhiteHouseCollector,
     RSSCollector,
 )
-from webhook.webhook import send_discord_message
+from webhook.webhook import format_endorsement_alert, send_discord_message
 
 logging.basicConfig(
     level=logging.INFO,
@@ -266,14 +266,7 @@ def _run_detection_batch() -> BatchResult:
 
 def _alert(result, item: dict) -> None:
     """Log an actionable endorsement and post it to Discord (best-effort)."""
-    message = (
-        "🚨 ENDORSEMENT DETECTED\n"
-        f"company: {result.company or '?'}\n"
-        f"ticker:  {result.ticker or '-'} (unverified — model-guessed)\n"
-        f"confidence: {result.confidence}   type: {result.endorsement_type}\n"
-        f"source: {item['source_name']}   {item.get('url') or '(no url)'}\n"
-        f"quote: {result.quote or '(no quote)'}"
-    )
+    message = format_endorsement_alert(result, item["source_name"], item.get("url"))
     logger.warning(message)
     send_discord_message(message)   # never raises; logs its own failures
 
