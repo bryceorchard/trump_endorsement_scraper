@@ -142,3 +142,9 @@ DETECTION_MAX_ATTEMPTS = int(os.getenv("DETECTION_MAX_ATTEMPTS", "3"))
 # items.next_attempt_at). Spaces the retries out so a transient Ollama slowdown
 # can't burn an item's whole attempt budget back-to-back — in any run mode.
 DETECTION_RETRY_COOLDOWN = int(os.getenv("DETECTION_RETRY_COOLDOWN", "600"))
+
+# ── Alerting ─────────────────────────────────────────────────────────────────
+# Discord webhook that actionable endorsements are posted to. Unset = no
+# Discord alerts (detections are still logged). Keep the token out of git — it's
+# a secret; set it in src/.env, never hard-code it.
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")

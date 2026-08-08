@@ -28,7 +28,9 @@ _NULLISH = {"", "null", "none", "n/a", "n.a.", "unknown"}
 # The model must stay within these enums; anything else is coerced to the
 # conservative value so a creative answer ("very high") can't skew alerting.
 _CONFIDENCES = {"high", "medium", "low"}
-_TYPES = {"explicit", "implicit", "financial", "none"}
+# Real endorsement types; the "no endorsement" case is represented by None
+# (the model's "null"/"none" output is normalized away by _nullish_to_none).
+_TYPES = {"explicit", "implicit", "financial"}
 
 # Plausible exchange-symbol shape (e.g. AAPL, DJT, BRK.B). NOTE: a match only
 # means well-formed — the model guesses tickers from company names and can be
@@ -62,14 +64,14 @@ Respond ONLY with valid JSON in this exact format:
   "ticker": "Stock ticker if known or null",
   "confidence": "high" | "medium" | "low",
   "quote": "The specific phrase that indicates endorsement, or null",
-  "endorsement_type": "explicit" | "implicit" | "financial" | "none"
+  "endorsement_type": "explicit" | "implicit" | "financial" | null
 }
 
 endorsement_type definitions:
 - explicit: Trump directly says to buy, invest in, or support the company
 - implicit: Trump praises the company/CEO in a way that implies support
 - financial: Trump references a stock, crypto, or financial product
-- none: No endorsement detected"""
+- null: No endorsement detected"""
 
 
 @dataclass
@@ -79,7 +81,7 @@ class EndorsementResult:
     ticker: Optional[str]
     confidence: str
     quote: Optional[str]
-    endorsement_type: str
+    endorsement_type: Optional[str]
     raw_text: str
 
 
@@ -163,9 +165,9 @@ def detect_endorsement(text: str, timeout: int | None = None) -> EndorsementResu
     if confidence not in _CONFIDENCES:
         confidence = "low"
 
-    endorsement_type = data.get("endorsement_type", "none")
+    endorsement_type = _nullish_to_none(data.get("endorsement_type"))
     if endorsement_type not in _TYPES:
-        endorsement_type = "none"
+        endorsement_type = None
 
     ticker = _nullish_to_none(data.get("ticker"))
     if ticker is not None:
@@ -196,7 +198,7 @@ def is_actionable(result: EndorsementResult) -> bool:
     return (
         result.endorsement_detected
         and result.confidence in ("high", "medium")
-        and result.endorsement_type != "none"
+        and result.endorsement_type is not None
         and bool(result.company or result.ticker)
     )
 
